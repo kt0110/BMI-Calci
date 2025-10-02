@@ -1,0 +1,1085 @@
+package fastrack.reflex.fragment
+
+/**
+ *  Created by Rajat Kumar.
+ *   * Titan Company Ltd
+ */
+
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.graphics.Color
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.text.Spannable
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.TextUtils
+import android.text.style.RelativeSizeSpan
+import android.util.Log
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import androidx.core.content.res.ResourcesCompat
+import androidx.fragment.app.viewModels
+import androidx.lifecycle.Observer
+import com.github.mikephil.charting.components.LimitLine
+import com.github.mikephil.charting.data.BarData
+import com.github.mikephil.charting.data.BarDataSet
+import com.github.mikephil.charting.data.BarEntry
+import com.github.mikephil.charting.highlight.Highlight
+import com.titan.logger.duration
+import fastrack.reflex.R
+import fastrack.reflex.activity.CalendarActivity
+import fastrack.reflex.activity.CalendarEventType
+import fastrack.reflex.alert.GenericBottomDialog
+import fastrack.reflex.alert.StressScoreInfoDialog
+import fastrack.reflex.base.BaseFragment
+import fastrack.reflex.canGoBackward
+import fastrack.reflex.canGoForward
+import fastrack.reflex.databinding.FragmentBarStressBinding
+import fastrack.reflex.getColorFromAttr
+import fastrack.reflex.getSerializableExtraWithBVC
+import fastrack.reflex.onInitialized
+import fastrack.reflex.preference.SharedPreference
+import fastrack.reflex.processDate
+import fastrack.reflex.processWeekDateRange
+import fastrack.reflex.setOnReflexClickListener
+import fastrack.reflex.tutorials.TutorialManager
+import fastrack.reflex.utils.CustomTypefaceSpan
+import fastrack.reflex.view.RoundedBarChartRenderer
+import fastrack.reflex.viewmodel.StressGraphModel
+import fastrack.reflex.viewmodel.StressViewModel
+import fastrack.reflex.widget.SummaryScope
+import fastrack.reflex.widget.SummaryScopeListener
+import titan.commons.atStartOfDay
+import titan.commons.controller.wearable.WearableController
+import titan.commons.getLocalCalendar
+import java.util.Date
+import kotlin.math.roundToInt
+import com.github.mikephil.charting.charts.BarChart
+import com.github.mikephil.charting.components.AxisBase
+import com.github.mikephil.charting.components.XAxis
+import com.github.mikephil.charting.formatter.ValueFormatter
+import fastrack.reflex.STRESS_SLOT_MINUTES
+import fastrack.reflex.STRESS_TOTAL_MINUTES
+import fastrack.reflex.processMonthDate
+import titan.commons.getCalendarFromDate
+import java.util.Calendar
+import fastrack.reflex.viewmodel.StressModel
+
+class StressBarFragment : BaseFragment<FragmentBarStressBinding>() {
+    private val viewModel: StressViewModel by viewModels()
+    private var thumbView: View? = null
+    private var scrollLeft = false
+    private val handler = Handler(Looper.getMainLooper())
+    private var scope: SummaryScope = SummaryScope.DAY
+    private var stressScoreDialog: StressScoreInfoDialog? = null
+    private val dataMap = LinkedHashMap<Int, Int>()
+    private val stressDataMap = LinkedHashMap<Int, Triple<Int, Int, Int>>()
+    private var loadingDialog: GenericBottomDialog? = null
+    private val tutorialManager = TutorialManager.manager
+    private var currentBaseDate: Date? = null
+    private val slotAverageMap = LinkedHashMap<Int, Float>()
+
+    private val W1 = 0.2f // weight for peak
+    private val W2 = 0.3f // weight for last
+    private val W3 = 0.5f // weight for mean
+
+    override fun onCreateView(
+        inflater: LayoutInflater, container: ViewGroup?,
+        savedInstanceState: Bundle?
+    ): View? {
+        binding = FragmentBarStressBinding.inflate(inflater, container, false)
+        thumbView =
+            LayoutInflater.from(context).inflate(R.layout.layout_seekbar_thumb, null, false)
+        observeClick(binding.root)
+        return binding.root
+    }
+
+    private fun openStressScoreInfoDialog() {
+        stressScoreDialog?.dismiss()
+        stressScoreDialog = context?.let { StressScoreInfoDialog(it, binding.container) }
+        stressScoreDialog?.show()
+    }
+
+    override fun init() {
+        // TODO: uncomment tutorial manager later
+        //tutorialManager.add(listener = tutorialListener)
+        val code = WearableController.instance().getWearableProduct()?.code ?: ""
+        binding.stressScoreInfo.setOnReflexClickListener {
+            openStressScoreInfoDialog()
+        }
+        binding.root.onInitialized {
+            binding.barChart.post {
+                binding.barChart.setViewPortOffsets(
+                    (binding.root.width * 0.10f),
+                    10f,
+                    (binding.root.width * 0.08f),
+                    55f
+                )
+                viewModel.setDate(Date())
+                scopeChangeEvent("") //Calling scopeChange Function to note the click stream when ui is initialized
+            }
+        }
+        viewModel.showProgress().observe(this, progressObserver)
+        binding.tvMinStress.stress("", "")
+        binding.tvMaxStress.stress("", "")
+        binding.tvLatestStress.stress("","")
+        viewModel.graphDetails().observe(this, dataObserver)
+        // binding.summaryScope = SummaryScope.DAY
+        setClickListeners()
+    }
+
+    // TODO: fix it later
+    /* private val tutorialListener = object : TutorialListener {
+         override fun invoke(tutorial: String) {
+             when (tutorial) {
+                 "stress" -> {
+                     val myFitnessBalloon = context?.let { tutorialManager.sleepBalloon(it, 0f) }
+                     myFitnessBalloon?.let { binding.stressScoreInfo.showAlignTop(it) }
+                 }
+             }
+         }
+     }*/
+
+    private fun setClickListeners() {
+        binding.backButton.setOnReflexClickListener {
+            onBackPressed()
+        }
+        binding.previousIcon.setOnReflexClickListener {
+            scopeChangeEvent("prev_")
+            viewModel.previous()
+            updateCarouselArrows()
+        }
+        binding.nextIcon.setOnReflexClickListener {
+            scopeChangeEvent("next_")
+            viewModel.next()
+            updateCarouselArrows()
+        }
+        binding.calendar.setOnReflexClickListener {
+            duration(Date().time, "calendar_click_v2")
+            binding.scrollView.scrollTo(0, 0)
+            val intent = Intent(this.activity, CalendarActivity::class.java)
+            intent.putExtra("END_DATE", getLocalCalendar().time.atStartOfDay())
+            intent.putExtra(
+                "START_DATE",
+                getLocalCalendar().apply {
+                    timeInMillis = SharedPreference.accountCreatedOn
+                }.time.atStartOfDay()
+            )
+            intent.putExtra("EVENT_TYPE", CalendarEventType.STRESS)
+            intent.putExtra("CALENDAR_VIEW_TYPE", viewModel.currentScope)
+            resultLauncher.launch(intent)
+        }
+        binding.summarySwitch.listener = scopeListener
+
+    }
+
+    private var resultLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode == Activity.RESULT_OK) {
+                val data: Intent? = result.data
+                if (data != null) {
+                    if (data.hasExtra("SELECTED_DATE")) {
+                        data.getSerializableExtraWithBVC("SELECTED_DATE", Date::class.java).let {
+                            it
+                        }?.let { viewModel.setDate(it) }
+                    } else if (data.hasExtra("END_DATE")) {
+                        data.getSerializableExtraWithBVC("END_DATE", Date::class.java).let {
+                            it
+                        }?.let { viewModel.setDate(it) }
+                    }
+                }
+            }
+        }
+
+
+    private val progressObserver = Observer<Boolean?> { bool ->
+        if (bool != null) {
+            loading(bool)
+        }
+    }
+
+    override fun resume() {
+        updateCarouselArrows()
+        startTime = Date().time
+    }
+
+    override fun pause() {
+
+    }
+
+    override fun destroyView() {
+        // TODO: remove it later
+        //tutorialManager.remove(listener = tutorialListener)
+        viewModel.graphDetails().removeObserver(dataObserver)
+        viewModel.showProgress().removeObserver(progressObserver)
+    }
+
+    private fun loading(show: Boolean) {
+        if (loadingDialog?.isShowing() == true && show) {
+            return
+        }
+        if (show) {
+            loadingDialog = context?.let { GenericBottomDialog(it, binding.container) }
+            loadingDialog?.setTitle(null)
+            context?.getString(R.string.processing)?.let { loadingDialog?.setMessage(it) }
+            loadingDialog?.show()
+        } else {
+            loadingDialog?.dismiss()
+        }
+    }
+
+    private val dataObserver = Observer<StressGraphModel?> { data ->
+        try {
+        dataMap.clear()
+        stressDataMap.clear()
+        data?.let { model ->
+            val stressDataInfo = computeStressTotals(model.stressModel)
+
+            when (model.scope) {
+                SummaryScope.DAY -> {
+                    stressDayView(model, stressDataInfo)
+                    setUpDayGraph(model, stressDataInfo.totalStressInstance)
+                }
+
+                SummaryScope.WEEK -> {
+                    stressWeekMonthView(model, stressDataInfo)
+                    setUpWeekGraph(data, stressDataInfo.totalStressInstance)
+                }
+
+                SummaryScope.MONTH -> {
+                    stressWeekMonthView(model, stressDataInfo)
+                    setUpMonthGraph(data, stressDataInfo.totalStressInstance)
+                }
+            }
+            scope = model.scope
+        }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            Log.e("StressBarFragment", "Error inside dataObserver", e)
+        }
+    }
+
+    private fun computeStressTotals(model: StressModel): StressModel {
+        val relax = model.relaxInstances.coerceAtLeast(0)
+        val normal = model.normalInstances.coerceAtLeast(0)
+        val medium = model.mediumInstances.coerceAtLeast(0)
+        val high = model.highInstances.coerceAtLeast(0)
+
+        val total = relax + normal + medium + high
+
+        val nonZeroCategories = listOf(relax, normal, medium, high).count { it > 0 }
+
+        val average = if (nonZeroCategories > 0) {
+            total.toFloat() / nonZeroCategories
+        } else {
+            0f
+        }
+        return StressModel(
+            relaxInstances = relax,
+            normalInstances = normal,
+            mediumInstances = medium,
+            highInstances = high,
+            average = average.roundToInt(),
+            totalStressInstance = total
+        )
+    }
+
+    private fun applyStressPercentages(
+        highStressBar: Int,
+        mediumStressBar: Int,
+        normalStressBar: Int,
+        relaxStressBar: Int
+    ) {
+        val counts = listOf(
+            highStressBar.coerceAtLeast(0),
+            mediumStressBar.coerceAtLeast(0),
+            normalStressBar.coerceAtLeast(0),
+            relaxStressBar.coerceAtLeast(0)
+        )
+        val totals = counts.sum()
+
+        if (totals == 0) {
+            updateHighStressProgressAndPercentage(0)
+            updateMediumStressProgressAndPercentage(0)
+            updateNormalStressProgressAndPercentage(0)
+            updateRelaxStressProgressAndPercentage(0)
+            return
+        }
+
+        // float math; multiply by 100.0 first, then divide
+        val percentages = counts.map { ((it * 100.0) / totals).roundToInt() }.toMutableList()
+
+        // keep your rounding fix
+        val diff = 100 - percentages.sum()
+        if (diff != 0) {
+            val idxMax = counts.indices.maxByOrNull { counts[it] } ?: 0
+            percentages[idxMax] = (percentages[idxMax] + diff).coerceIn(0, 100)
+        }
+
+        updateHighStressProgressAndPercentage(percentages[0])
+        updateMediumStressProgressAndPercentage(percentages[1])
+        updateNormalStressProgressAndPercentage(percentages[2])
+        updateRelaxStressProgressAndPercentage(percentages[3])
+    }
+
+
+    private fun updateHighStressProgressAndPercentage(progress: Int) {
+        binding.progressHigh.progress = progress
+        binding.tvHighPercent.text = "$progress%"
+    }
+
+    private fun updateMediumStressProgressAndPercentage(progress: Int) {
+        binding.progressMedium.progress = progress
+        binding.tvMediumPercent.text = "$progress%"
+    }
+
+    private fun updateNormalStressProgressAndPercentage(progress: Int) {
+        binding.progressNormal.progress = progress
+        binding.tvNormalPercent.text = "$progress%"
+    }
+
+    private fun updateRelaxStressProgressAndPercentage(progress: Int) {
+        binding.progressRelax.progress = progress
+        binding.tvRelaxPercent.text = "$progress%"
+    }
+
+    private fun setUpMonthGraph(data: StressGraphModel, total: Int) {
+        slotAverageMap.clear()
+        currentBaseDate = data.date
+        val maxDay = getCalendarFromDate(data.date).getActualMaximum(Calendar.DAY_OF_MONTH)
+
+        if (!data.isGraphEmpty()) {
+            binding.bottomBar.visibility = View.GONE
+            val barEntries = ArrayList<BarEntry>()
+            val barColors = ArrayList<Int>()
+            val positiveValues = mutableListOf<Int>()
+            val ctx = context ?: return
+
+            var index = 1f
+            for (item in data.stressData) {
+                val avg = item.value.second.toFloat()
+
+                if (avg > 0f) {
+                    barEntries.add(BarEntry(index, avg))
+                    positiveValues.add(avg.roundToInt())
+                    slotAverageMap[index.toInt()] = avg
+                    barColors.add(getStressColor(ctx, avg))
+                } else {
+                    // missing data -> placeholder 0 and gray color
+                    barEntries.add(BarEntry(index, 0f))
+                    barColors.add(ContextCompat.getColor(ctx, android.R.color.darker_gray))
+                    slotAverageMap[index.toInt()] = 0f
+                }
+                index++
+            }
+            updateStressPercentage(positiveValues)
+
+            binding.barChart.apply {
+                axisLeft.removeAllLimitLines()
+                axisLeft.axisMinimum = 0f
+                axisLeft.axisMaximum = 100f
+                axisLeft.setDrawGridLines(false)
+                axisLeft.isEnabled = true
+                xAxis.isEnabled = true
+                xAxis.setDrawGridLines(false)
+                axisRight.setDrawGridLines(false)
+                axisRight.isEnabled = false
+                xAxis.axisMinimum = 0f
+                xAxis.axisMaximum = (maxDay + 1).toFloat()
+                legend.isEnabled = false
+                description.isEnabled = false
+            }
+
+            binding.barChart.axisLeft.removeAllLimitLines() // ensure no duplicates
+            if (positiveValues.isNotEmpty()) {
+                val overallAvg = positiveValues.average().toFloat()
+                val avgLine = LimitLine(overallAvg).apply {
+                    lineWidth = 1f
+                    enableDashedLine(10f, 10f, 0f)
+                    lineColor = try {
+                        getColorFromAttr(ctx, R.attr.colorAccent)
+                    } catch (e: Exception) {
+                        ContextCompat.getColor(ctx, android.R.color.holo_orange_light)
+                    }
+                }
+                binding.barChart.axisLeft.addLimitLine(avgLine)
+                binding.barChart.axisLeft.setDrawLimitLinesBehindData(false)
+            }
+
+            binding.barChart.data = null
+            val barDataSet = BarDataSet(barEntries, "")
+            barDataSet.colors = barColors
+            barDataSet.setDrawValues(false)
+            barDataSet.isHighlightEnabled = true
+            barDataSet.highLightColor = Color.TRANSPARENT
+            barDataSet.highLightAlpha = 0
+
+            val barData = BarData(barDataSet)
+            barData.barWidth = 0.6f
+
+            binding.barChart.let { chart ->
+                chart.data = barData
+                chart.setScaleEnabled(false)
+                chart.setPinchZoom(false)
+                StressBarsSpindleView.attach(
+                    binding.barChart,
+                    total,
+                    slotAverageMap,
+                    isDayView(data.scope),
+                    currentBaseDate,
+                    data.scope
+                )
+                val lastIndexWithData = barEntries.indexOfLast { entry -> entry.y > 0f }
+                if (lastIndexWithData >= 0) {
+                    chart.post {
+                        try {
+                            val combinedData = chart.data
+                            if (combinedData != null) {
+                                val dataSetIndex =
+                                    combinedData.dataSets.indexOfFirst { it is BarDataSet }
+                                val dsIndex = if (dataSetIndex >= 0) dataSetIndex else 0
+
+                                val entry = barEntries[lastIndexWithData]
+                                val highlight = Highlight(entry.x, entry.y, dsIndex)
+                                highlight.dataIndex = 0
+                                chart.highlightValue(highlight, true)
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }
+                }
+            }
+            binding.typeTextView.visibility = View.VISIBLE
+        } else {
+            binding.barChart.let {
+                it.data = null
+                it.invalidate()
+                it.setNoDataText(getString(R.string.no_data_available))
+                binding.bottomBar.visibility = View.VISIBLE
+                it.visibility = View.VISIBLE
+                updateStressPercentage(emptyList())
+                binding.typeTextView.visibility = View.INVISIBLE
+            }
+            return
+        }
+        binding.barChart.contentDescription = getString(R.string.empty)
+        binding.barChart.notifyDataSetChanged()
+        binding.barChart.invalidate()
+        setMonthXAxis(maxDay)
+    }
+
+
+    private fun setUpWeekGraph(data: StressGraphModel, total: Int) {
+        slotAverageMap.clear()
+        currentBaseDate = data.date
+
+        if (data.isGraphEmpty()) {
+            binding.barChart.let {
+                it.data = null
+                it.invalidate()
+                it.setNoDataText(getString(R.string.no_data_available))
+                binding.bottomBar.visibility = View.VISIBLE
+                it.visibility = View.VISIBLE
+                updateStressPercentage(emptyList())
+                binding.typeTextView.visibility = View.INVISIBLE
+            }
+            return
+        }
+        binding.bottomBar.visibility = View.GONE
+        val barEntries = ArrayList<BarEntry>()
+        val barColors = ArrayList<Int>()
+        val positiveValues = mutableListOf<Int>()
+        val ctx = context ?: return
+
+        var index = 1
+        for (item in data.stressData) {
+            val avg = item.value.second.toFloat()
+            if (avg > 0) {
+                barEntries.add(BarEntry(index.toFloat(), avg))
+                positiveValues.add(avg.roundToInt())
+                slotAverageMap[index] = avg
+                barColors.add(getStressColor(ctx, avg))
+            } else {
+                barEntries.add(BarEntry(index.toFloat(), 0f))
+                barColors.add(ContextCompat.getColor(ctx, android.R.color.darker_gray))
+                slotAverageMap[index] = 0f
+            }
+            index++
+        }
+        updateStressPercentage(positiveValues)
+
+        // Chart styling
+        binding.barChart.apply {
+            axisLeft.removeAllLimitLines()
+            axisLeft.axisMinimum = 0f
+            axisLeft.axisMaximum = 100f
+            axisLeft.setDrawGridLines(false)
+            axisLeft.isEnabled = true
+            xAxis.isEnabled = true
+            xAxis.setDrawGridLines(false)
+            axisRight.setDrawGridLines(false)
+            axisRight.isEnabled = false
+            xAxis.axisMinimum = 0f
+            xAxis.axisMaximum = 8f
+            legend.isEnabled = false
+            description.isEnabled = false
+
+            if (positiveValues.isNotEmpty()) {
+                val overallAvg = positiveValues.average().toFloat()
+                val avgLine = LimitLine(overallAvg).apply {
+                    lineWidth = 1f
+                    enableDashedLine(10f, 10f, 0f)
+                    lineColor = try {
+                        getColorFromAttr(ctx, R.attr.colorAccent)
+                    } catch (e: Exception) {
+                        ContextCompat.getColor(ctx, android.R.color.holo_orange_light)
+                    }
+                    label = ""
+                }
+                axisLeft.addLimitLine(avgLine)
+                axisLeft.setDrawLimitLinesBehindData(false)
+            }
+        }
+
+        val barDataSet = BarDataSet(barEntries, "")
+        barDataSet.colors = barColors
+        barDataSet.setDrawValues(false)
+        barDataSet.isHighlightEnabled = true
+        barDataSet.highLightColor = Color.TRANSPARENT
+        barDataSet.highLightAlpha = 0
+
+        val barData = BarData(barDataSet)
+        barData.barWidth = 0.45f
+        applyRoundedBarRenderer(binding.barChart, 6f, ctx)
+        binding.barChart.renderer?.paintRender?.shader = null
+
+        binding.barChart.let { chart ->
+            chart.data = barData
+            chart.setScaleEnabled(false)
+            chart.setPinchZoom(false)
+            StressBarsSpindleView.attach(
+                binding.barChart,
+                total,
+                slotAverageMap,
+                isDayView(data.scope),
+                currentBaseDate,
+                data.scope
+            )
+
+            val lastIndexWithData = barEntries.indexOfLast { entry -> entry.y > 0f }
+            if (lastIndexWithData >= 0) {
+                chart.post {
+                    try {
+                        val combinedData = chart.data
+                        if (combinedData != null) {
+                            val dataSetIndex =
+                                combinedData.dataSets.indexOfFirst { it is BarDataSet }
+                            val dsIndex = if (dataSetIndex >= 0) dataSetIndex else 0
+
+                            val entry = barEntries[lastIndexWithData]
+                            val highlight = Highlight(entry.x, entry.y, dsIndex)
+                            highlight.dataIndex = 0
+                            chart.highlightValue(highlight, true)
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+            }
+        }
+
+        binding.typeTextView.visibility = View.VISIBLE
+
+        binding.barChart.contentDescription = getString(R.string.empty)
+        binding.barChart.notifyDataSetChanged()
+        binding.barChart.invalidate()
+        setWeekXAxis()
+    }
+
+    private fun isDayView(scope: SummaryScope) : Boolean {
+        return scope.message == "day"
+    }
+
+    private fun isWeekView(scope: SummaryScope) : Boolean {
+        return scope.message == "week"
+    }
+
+
+    private fun getStressColor(ctx: Context, avg: Float): Int {
+        val colorRes = when (avg) {
+            in 0f..25f -> R.color.relax_stress
+            in 26f..50f -> R.color.normal_stress
+            in 51f..75f -> R.color.medium_stress
+            in 76f..100f -> R.color.high_stress
+            else -> android.R.color.darker_gray
+        }
+        return ContextCompat.getColor(ctx, colorRes)
+    }
+
+    private fun stressWeekMonthView(
+        model: StressGraphModel,
+        stressDataInfo: StressModel,
+    ) {
+        binding.tvMaxStress.stress(model.max.toString(), "")
+        binding.tvMinStress.stress(model.min.toString(), "")
+        binding.tvMinText.text = getString(R.string.avg_min)
+        binding.tvMaxText.text = getString(R.string.avg_max)
+        binding.latestStressLayout.visibility = View.GONE
+        binding.stressScoreTv.text = getAvgStress(model.stressModel.average)
+        binding.stressScoreType.text = processStressType(context, model.last, stressDataInfo.totalStressInstance)
+        binding.dateText.text =
+            if (isWeekView(model.scope)) processWeekDateRange(model.date) else processMonthDate(model.date)
+    }
+
+    private fun getAvgStress(average: Int) : String {
+        if(average == 0) return "-"
+        return average.toString()
+    }
+
+    private fun dpToPx(dp: Float, context: Context): Float =
+        dp * context.resources.displayMetrics.density
+
+    fun applyRoundedBarRenderer(
+        chart: BarChart,
+        radiusDp: Float,
+        context: Context
+    ) {
+        val radiusPx = dpToPx(radiusDp, context)
+        chart.renderer = RoundedBarChartRenderer(
+            chart,
+            chart.animator,
+            chart.viewPortHandler,
+            radiusPx
+        )
+        chart.renderer?.paintRender?.shader = null
+
+        // avoid shadow behind bars so rounded corners are clean
+        chart.setDrawBarShadow(false)
+    }
+
+    private fun setUpDayGraph(data: StressGraphModel, total: Int) {
+        slotAverageMap.clear()
+        binding.bottomBar.visibility = View.GONE
+
+        if (data.isGraphEmpty()) {
+            binding.barChart.let {
+                it.data = null
+                it.invalidate()
+                it.setNoDataText(getString(R.string.no_data_available))
+                updateStressPercentage(emptyList())
+                binding.bottomBar.visibility = View.VISIBLE
+                it.visibility = View.VISIBLE
+            }
+            return
+        }
+
+        val slotMinutes = STRESS_SLOT_MINUTES
+        val totalMinutes = STRESS_TOTAL_MINUTES
+        val slotCount = totalMinutes / slotMinutes // 48
+
+        val slotAverages = MutableList(slotCount) { 0f }
+        val positiveValues = mutableListOf<Int>()
+
+        for (slotIndex in 0 until slotCount) {
+            val startMinute = slotIndex * slotMinutes + 1   // 1..1440
+            val endMinute = (slotIndex + 1) * slotMinutes
+            val valuesInSlot = (startMinute..endMinute).asSequence()
+                .mapNotNull { data.combo[it] }
+                .filter { it > 0 }
+                .toList()
+
+            if (valuesInSlot.isNotEmpty()) {
+                val finalAvg = computePsychologicalAvg(valuesInSlot)
+                slotAverages[slotIndex] = finalAvg
+                slotAverageMap[slotIndex] = finalAvg
+                positiveValues.add(finalAvg.roundToInt())
+            } else {
+                slotAverages[slotIndex] = 0f
+                slotAverageMap[slotIndex] = 0f
+            }
+        }
+        updateStressPercentage(positiveValues)
+        val barEntries = ArrayList<BarEntry>(slotCount)
+        for (i in 0 until slotCount) {
+            barEntries.add(BarEntry(i.toFloat(), slotAverages[i]))
+        }
+        val ctx = binding.root.context
+        val colors = ArrayList<Int>(slotCount)
+        for (i in 0 until slotCount) {
+            val avg = slotAverages[i]
+            colors.add(getStressColor(ctx, avg))
+        }
+        val barDataSet = BarDataSet(barEntries, "").apply {
+            this.colors = colors
+            setDrawValues(false)
+            isHighlightEnabled = true
+            highLightColor = Color.TRANSPARENT
+            highLightAlpha = 0
+        }
+
+        val barData = BarData(barDataSet).apply {
+            barWidth = 0.8f
+            applyRoundedBarRenderer(binding.barChart, 6f, ctx)
+            binding.barChart.renderer?.paintRender?.shader = null
+        }
+
+        binding.barChart.let { chart ->
+            chart.data = barData
+            chart.setScaleEnabled(false)
+            chart.setPinchZoom(false)
+            StressBarsSpindleView.attach(
+                binding.barChart,
+                total,
+                slotAverageMap,
+                isDayView(data.scope),
+                currentBaseDate,
+                data.scope
+            )
+
+            chart.axisLeft.removeAllLimitLines()
+            if (positiveValues.isNotEmpty()) {
+                val overallAvg = positiveValues.average().toFloat()
+                val avgLine = LimitLine(overallAvg).apply {
+                    lineWidth = 1f
+                    enableDashedLine(10f, 10f, 0f)
+                    lineColor = getColorFromAttr(ctx, R.attr.colorAccent)
+                    label = ""
+                }
+                chart.axisLeft.addLimitLine(avgLine)
+            }
+
+            chart.setFitBars(true)
+            chart.description.isEnabled = false
+            chart.legend.isEnabled = false
+            chart.notifyDataSetChanged()
+            chart.invalidate()
+
+            // Y axis
+            chart.axisLeft.apply {
+                isEnabled = true
+                axisMinimum = 0f
+                axisMaximum = 100f
+                setDrawGridLines(false)
+            }
+            chart.xAxis.apply {
+                axisMinimum = -0.5f
+                axisMaximum = slotCount - 0.5f
+                isEnabled = false
+                setDrawGridLines(false)
+            }
+
+            chart.axisRight.apply {
+                isEnabled = false
+                setDrawGridLines(false)
+            }
+
+            val lastIndexWithData = barEntries.indexOfLast { entry -> entry.y > 0f }
+            if (lastIndexWithData >= 0) {
+                chart.post {
+                    try {
+                        val combinedData = chart.data
+                        if (combinedData != null) {
+                            val dataSetIndex =
+                                combinedData.dataSets.indexOfFirst { it is BarDataSet }
+                            val dsIndex = if (dataSetIndex >= 0) dataSetIndex else 0
+
+                            val entry = barEntries[lastIndexWithData]
+                            val highlight = Highlight(entry.x, entry.y, dsIndex)
+                            highlight.dataIndex = 0
+                            chart.highlightValue(highlight, true)
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+            }
+
+            chart.notifyDataSetChanged()
+            chart.invalidate()
+            chart.visibility = View.VISIBLE
+        }
+        setDayXAxis(binding.barChart, slotCount)
+    }
+    /**
+     * Compute Psychological Avg for a slot
+     * Formula = (w1 * Peak) + (w2 * End) + (w3 * Mean)
+     */
+    private fun computePsychologicalAvg(
+        values: List<Int>,
+    ): Float {
+        if (values.isEmpty()) return 0f
+
+        val peak = values.max()
+        val end = values.last()
+        val mean = values.average().toFloat()
+
+        val weighted = (W1 * peak) + (W2 * end) + (W3 * mean)
+        return weighted.roundToInt().toFloat() // round to int, keep float for chart
+    }
+
+
+    private fun updateStressPercentage(positiveValues: List<Int>) {
+         var relaxBarCnt = 0
+         var normalBarCnt = 0
+         var mediumBarCnt = 0
+         var highBarCnt = 0
+        if (positiveValues.isEmpty()){
+            applyStressPercentages(
+                highBarCnt,
+                mediumBarCnt,
+                normalBarCnt,
+                relaxBarCnt
+            )
+            return
+        }
+
+        for (value in positiveValues) {
+            when(value) {
+                in 0..25 -> relaxBarCnt++
+                in 26..50 -> normalBarCnt++
+                in 51..75 -> mediumBarCnt++
+                in 76..100 -> highBarCnt++
+                else -> ""
+            }
+        }
+        applyStressPercentages(
+            highBarCnt,
+            mediumBarCnt,
+            normalBarCnt,
+            relaxBarCnt
+        )
+    }
+
+    fun stressDayView(model: StressGraphModel, stressDataInfo: StressModel) {
+        binding.tvMaxStress.stress(model.max.toString(), "")
+        binding.tvMinStress.stress(model.min.toString(), "")
+        binding.tvLatestStress.stress(model.last.toString(),"")
+        binding.tvMinText.text = getString(R.string.minimum)
+        binding.tvMaxText.text = getString(R.string.maximum)
+        binding.latestStressLayout.visibility = View.VISIBLE
+        binding.stressScoreTv.text = getAvgStress(model.stressModel.average).toString()
+        binding.stressScoreType.text = processStressType(context, model.stressModel.average, stressDataInfo.totalStressInstance)
+
+        binding.dateText.text = processDate(model.date)
+    }
+
+
+    private fun setDayXAxis(
+        chart: BarChart,
+        slotCount: Int,
+    ) {
+        val x = chart.xAxis
+        x.apply {
+            isEnabled = true
+            setDrawLabels(true)
+            position = XAxis.XAxisPosition.BOTTOM
+            isGranularityEnabled = true
+            x.granularity = 4f
+            yOffset = 8f
+            setLabelCount((slotCount / 4) + 1, false)
+
+            textSize = 10f
+            setAvoidFirstLastClipping(true)
+            labelRotationAngle = 0f
+
+            setDrawGridLines(false)
+            valueFormatter = object : ValueFormatter() {
+                override fun getAxisLabel(value: Float, axis: AxisBase?): String {
+                    val idx = value.roundToInt()
+                    if (idx < 0 || idx >= slotCount) return ""
+
+                    // show only every 4th slot (every 4 hours)
+                    if (idx % 8 != 0) return ""
+
+                    val totalMinutes = idx * 30
+                    val hh24 = (totalMinutes / 60) % 24
+                    val mm = totalMinutes % 60
+
+                    if (mm != 0) return "" // only want full hours
+
+                    return when (hh24) {
+                        0 -> "12 am"
+                        12 -> "12 pm"
+                        else -> (hh24 % 12).toString()
+                    }
+                }
+            }
+        }
+        chart.notifyDataSetChanged()
+        chart.invalidate()
+    }
+
+    private fun setWeekXAxis() {
+        val days = listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+        val rotatedDays = if (viewModel.isCustomWeekDay()) {
+            val start = viewModel.weekDay()
+            (0 until 7).map { i -> days[(start - 1 + i) % 7] }
+        } else {
+            days
+        }
+
+        binding.barChart.apply {
+            xAxis.apply {
+                axisMinimum = 0f
+                axisMaximum = 8f
+                granularity = 1f
+                labelCount = 9
+
+                position = XAxis.XAxisPosition.BOTTOM
+                setDrawLabels(true)
+                setDrawAxisLine(true)
+                axisLineColor = Color.LTGRAY
+                axisLineWidth = 0.5f
+                setDrawGridLines(false)
+
+                textSize = 11f
+                textColor = Color.BLACK
+                yOffset = 9f
+
+                valueFormatter = object : ValueFormatter() {
+                    override fun getFormattedValue(value: Float): String {
+                        val i = value.toInt()
+                        return if (i in 1..7) rotatedDays[i - 1] else ""
+                    }
+                }
+            }
+
+            invalidate()
+        }
+    }
+
+    private fun setMonthXAxis(maxDay: Int) {
+        binding.barChart.notifyDataSetChanged()
+        binding.barChart.apply {
+            xAxis.apply {
+                axisMinimum = 0f
+                axisMaximum = (maxDay + 1).toFloat()
+                granularity = 1f
+                setDrawGridLines(false)
+                setDrawAxisLine(true)
+                setDrawLabels(true)
+                setLabelCount(maxDay, true)
+                xAxis.labelCount = maxDay
+                xAxis.isGranularityEnabled = true
+                position = XAxis.XAxisPosition.BOTTOM
+
+                textSize = 11f
+                textColor = Color.BLACK
+                yOffset = 8.5f
+                labelRotationAngle = 0f
+
+                valueFormatter = object : ValueFormatter() {
+                    override fun getFormattedValue(value: Float): String {
+                        val i = value.toInt()
+                        // show only multiples of 7 (7,14,21,28), leave others blank
+                        return if (i in 1..maxDay && i % 7 == 0) i.toString() else ""
+                    }
+                }
+            }
+            clipToPadding = false
+            clipChildren = false
+
+            invalidate()
+        }
+    }
+
+    private val scopeListener = object : SummaryScopeListener {
+        override fun selected(scope: SummaryScope) {
+            // binding.summaryScope = scope
+            viewModel.selectedScope(scope)
+            scopeChangeEvent("")
+            updateCarouselArrows()
+        }
+    }
+
+    fun start(scrollLeft: Boolean) {
+        this.scrollLeft = scrollLeft
+    }
+
+    private fun updateCarouselArrows() {
+        if (viewModel.getScopeDate().canGoForward(viewModel.currentScope)) {
+            binding.nextIcon.visibility = View.VISIBLE
+        } else {
+            binding.nextIcon.visibility = View.INVISIBLE
+        }
+        if (viewModel.getScopeDate().canGoBackward(viewModel.currentScope)) {
+            binding.previousIcon.visibility = View.VISIBLE
+        } else {
+            binding.previousIcon.visibility = View.INVISIBLE
+        }
+    }
+
+    private fun scopeChangeEvent(clickAction: String) {
+        when (viewModel.currentScope) {
+            SummaryScope.DAY -> {
+                duration(Date().time, "stress_summary_day_${clickAction}v2")
+            }
+
+            SummaryScope.WEEK -> {
+                duration(Date().time, "stress_summary_week_${clickAction}v2")
+            }
+
+            SummaryScope.MONTH -> {
+                duration(Date().time, "stress_summary_month_${clickAction}v2")
+            }
+        }
+    }
+
+    companion object {
+        @JvmStatic
+        fun TextView.stress(value: String, type: String) {
+            val isZero = (value.toIntOrNull() ?: 0) == 0
+            if (isZero) {
+                val na = "--"
+                val span1 = SpannableString(na)
+                span1.setSpan(
+                    RelativeSizeSpan(1f), 0,
+                    span1.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+                this.text = TextUtils.concat(span1)
+            } else {
+                val span1 = SpannableString(value)
+                span1.setSpan(
+                    RelativeSizeSpan(1f), 0,
+                    span1.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+                val span2 = SpannableString(" ".plus(type))
+                span2.setSpan(
+                    RelativeSizeSpan(0.35f), 0,
+                    span2.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+                span2.setSpan(
+                    CustomTypefaceSpan(
+                        ResourcesCompat.getFont(
+                            context,
+                            R.font.oswald_extra_light
+                        )
+                    ),
+                    0, span2.length,
+                    Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+                this.text = TextUtils.concat(span1, span2)
+            }
+        }
+    }
+}
+
+fun processStressType(context: Context?, average: Int, total: Int): String {
+    if (total == 0) return ""
+    return when (average) {
+        in 0..25 -> context?.getString(R.string.relax) ?: "Relax"
+        in 26..50 -> context?.getString(R.string.normal) ?: "Normal"
+        in 51..75 -> context?.getString(R.string.medium) ?: "Medium"
+        in 76..100 -> context?.getString(R.string.high) ?: "High"
+        else -> "Unknown"
+    }
+}
