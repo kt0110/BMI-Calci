@@ -1,0 +1,347 @@
+package fastrack.reflex.fragment
+
+/**
+ *  Created by Rajat Kumar.
+ *   * Titan Company Ltd
+ */
+
+import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.text.SpannableString
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.TextUtils
+import android.text.format.DateFormat
+import android.text.style.RelativeSizeSpan
+import android.view.View
+import android.widget.TextView
+import androidx.core.content.ContextCompat
+import androidx.core.graphics.toColorInt
+import androidx.core.graphics.withSave
+import androidx.core.graphics.withTranslation
+import com.github.mikephil.charting.charts.BarChart
+import com.github.mikephil.charting.components.MarkerView
+import com.github.mikephil.charting.data.Entry
+import com.github.mikephil.charting.highlight.Highlight
+import com.github.mikephil.charting.listener.OnChartValueSelectedListener
+import com.github.mikephil.charting.utils.MPPointF
+import com.titan.logger.duration
+import fastrack.reflex.R
+import fastrack.reflex.Reflex
+import fastrack.reflex.STRESS_TOTAL_SLOTS
+import fastrack.reflex.databinding.LayoutSeekbarThumbStressBinding
+import fastrack.reflex.widget.SummaryScope
+import titan.commons.d2_m3
+import java.util.Calendar
+import java.util.Date
+import kotlin.math.round
+import kotlin.math.roundToInt
+
+var lastSelectedEntry: Entry? = null
+var lastHighlight: Highlight? = null
+
+class StressBarsSpindleView(private val barChart: BarChart) {
+
+    private val ctx: Context get() = barChart.context
+    private var startTime: Long = 0L
+
+    /** Call this once after setting chart data to enable marker + selection behavior. */
+    fun attach(
+        total: Int,
+        slotAverageMap: LinkedHashMap<Int, Float>,
+        isDayView: Boolean,
+        currentBaseDate: Date?,
+        scope: SummaryScope
+    ) {
+        preventMarkerViewDisSelectionOnDoubleClick()
+        createMarkerView(total, slotAverageMap , isDayView, currentBaseDate,scope)
+    }
+
+    private fun preventMarkerViewDisSelectionOnDoubleClick() {
+        barChart.setOnChartValueSelectedListener(object : OnChartValueSelectedListener {
+            override fun onValueSelected(e: Entry?, h: Highlight?) {
+                lastSelectedEntry = e
+                lastHighlight = h
+            }
+
+            override fun onNothingSelected() {
+                if (lastSelectedEntry != null && lastHighlight != null) {
+                    barChart.highlightValue(lastHighlight)
+                }
+            }
+        })
+    }
+
+    private fun createMarkerView(
+        total: Int,
+        slotAverageMap: LinkedHashMap<Int, Float>,
+        isDayView: Boolean,
+        currentBaseDate: Date?,
+        scope: SummaryScope
+    ) {
+        barChart.apply {
+            startTime = Date().time
+            val markerView = object : MarkerView(context, R.layout.layout_seekbar_thumb_stress) {
+
+                private val markerBinding: LayoutSeekbarThumbStressBinding =
+                    LayoutSeekbarThumbStressBinding.bind(findViewById(R.id.root_container))
+
+                private val linePaint = Paint().apply {
+                    color = "#40445f".toColorInt()
+                    strokeWidth = 3.5f
+                    isAntiAlias = true
+                    style = Paint.Style.STROKE
+                }
+                private val circlePaint = Paint().apply {
+                    color = "#284582".toColorInt()
+                    isAntiAlias = true
+                    style = Paint.Style.FILL
+                }
+
+                private val density = resources.displayMetrics.density
+                private val circleRadiusPx = 5f * density
+                private val fixedTopPaddingPx = 10f * density
+                private val minLineHeightPx = 70f
+
+                override fun refreshContent(e: Entry?, highlight: Highlight?) {
+                    e?.let {
+                        setHighlightPositionWeekMarker(
+                            e.x.roundToInt(),
+                            markerBinding,
+                            total,
+                            slotAverageMap,
+                            isDayView,
+                            currentBaseDate
+                        )
+                        duration(Date().time, "stress_spindle_${scope.message}_v2")
+                    }
+                    super.refreshContent(e, highlight)
+                }
+
+                override fun getOffset(): MPPointF {
+                    return MPPointF(
+                        -(measuredWidth / 2f),
+                        -measuredHeight.toFloat() - 8f * resources.displayMetrics.density
+                    )
+                }
+
+                override fun draw(canvas: Canvas, posX: Float, posY: Float) {
+                    // measure on first draw
+                    if (measuredWidth == 0 || measuredHeight == 0) {
+                        val wSpec = MeasureSpec.makeMeasureSpec(
+                            (this@apply.width * 0.8f).toInt(),
+                            MeasureSpec.AT_MOST
+                        )
+                        val hSpec = MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED)
+                        measure(wSpec, hSpec)
+                        layout(0, 0, measuredWidth, measuredHeight)
+                    }
+
+                    val contentTop = viewPortHandler.contentTop()
+                    val contentBottom = viewPortHandler.contentBottom()
+
+                    var lineStartY = contentTop + fixedTopPaddingPx
+                    val lineEndY = contentBottom - circleRadiusPx
+
+                    if (lineEndY - lineStartY < minLineHeightPx) {
+                        lineStartY = lineEndY - minLineHeightPx
+                    }
+
+                    val markerH = measuredHeight.toFloat()
+                    var bubbleTop = lineStartY - markerH
+                    if (bubbleTop < contentTop) {
+                        bubbleTop = contentTop
+                        lineStartY = bubbleTop + markerH
+                    }
+
+                    // draw stem + circle
+                    canvas.withSave {
+                        drawLine(posX, lineStartY, posX, lineEndY + 15f, linePaint)
+                        drawCircle(
+                            posX,
+                            lineEndY + circleRadiusPx + 10f,
+                            circleRadiusPx,
+                            circlePaint
+                        )
+                    }
+
+                    // clamp horizontally so bubble stays inside content area
+                    val left = viewPortHandler.contentLeft()
+                    val right = viewPortHandler.contentRight()
+                    var translateX = posX - (measuredWidth / 2f)
+                    translateX = translateX.coerceIn(left, right - measuredWidth.toFloat())
+
+                    val translateY = bubbleTop + 2f
+
+                    canvas.withTranslation(translateX, translateY) {
+                        super.draw(canvas)
+                    }
+                }
+            }
+
+            // attach marker
+            marker = markerView
+        }
+    }
+
+    private fun setHighlightPositionWeekMarker(
+        stressBarPosition: Int,
+        markerBinding: LayoutSeekbarThumbStressBinding,
+        total: Int,
+        slotAverageMap: LinkedHashMap<Int, Float>,
+        isDayView: Boolean,
+        currentBaseDate: Date?
+    ) {
+        try {
+            if (slotAverageMap.isNotEmpty()) {
+                stressSpindleThumbData(stressBarPosition, markerBinding, total, slotAverageMap,isDayView, currentBaseDate)
+                markerBinding.container.visibility = View.VISIBLE
+            } else {
+                markerBinding.container.visibility = View.INVISIBLE
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            markerBinding.container.visibility = View.INVISIBLE
+        }
+    }
+
+    private fun stressSpindleThumbData(
+        stressBarPosition: Int,
+        markerBinding: LayoutSeekbarThumbStressBinding,
+        total: Int,
+        slotAverageMap: LinkedHashMap<Int, Float>,
+        isDayView: Boolean,
+        currentBaseDate: Date?
+    ) {
+        val defaultAvgStress = 27
+        val emptyText = "-- Avg. Stress"
+
+        // views
+        val avgStressText = markerBinding.startText
+        val stressTypeText = markerBinding.topText
+        val timeStampText = markerBinding.bottomText
+        val thumbView = markerBinding.container
+        val thumbViewLayout = markerBinding.rootContainer
+        val goalText = markerBinding.goalText
+
+        goalText.visibility = View.GONE
+        thumbView.background = ContextCompat.getDrawable(
+            ctx,
+            R.drawable.background_summary_spindle_sleep
+        )
+
+        // NOTE: slotAverageMap keys are expected 1..48 for day, 1..7 for week, etc.
+        val avgFloat = slotAverageMap[stressBarPosition] ?: 0f
+
+        if (avgFloat <= 0f || stressBarPosition !in 0..(STRESS_TOTAL_SLOTS - 1)) {
+            // no recorded data for this slot
+            avgStressText.text = emptyText
+            avgStressText.visibility = View.INVISIBLE
+
+            stressTypeText.text = processStressType(ctx, defaultAvgStress, total)
+            stressTypeText.visibility = View.INVISIBLE
+
+            timeStampText.text = slotToTimeRange(stressBarPosition)
+            timeStampText.visibility = View.INVISIBLE
+
+            thumbViewLayout.visibility = View.INVISIBLE
+            return
+        }
+
+        val avgStress = round(avgFloat).toInt()
+        thumbView.visibility = View.VISIBLE
+        avgStressText.avgStressText(avgStress)
+        avgStressText.visibility = View.VISIBLE
+        thumbViewLayout.visibility = View.VISIBLE
+
+        stressTypeText.text = processStressType(ctx, avgStress, total)
+        stressTypeText.visibility = View.VISIBLE
+
+        timeStampText.text = if (isDayView)
+            slotToTimeRange(stressBarPosition)
+        else
+            getSlotDate(
+            currentBaseDate,
+            stressBarPosition
+        )
+        timeStampText.visibility = View.VISIBLE
+    }
+
+    private fun getSlotDate(currentBaseDate: Date?, stressBarPosition: Int): String {
+        val res = Calendar.getInstance().apply {
+            if (currentBaseDate != null) time = currentBaseDate
+            add(Calendar.DAY_OF_MONTH, stressBarPosition.minus(1))
+        }.time
+        return d2_m3.format(res)
+    }
+
+    /**
+     * Convert a 30-min slot (0..47) to a 12-hour or 24-hour formatted range string.
+     * slot 0 => "12:00 AM - 12:30 AM"
+     * slot 47 => "11:30 PM - 12:00 AM"
+     */
+    private fun slotToTimeRange(slot: Int): String {
+        val startTotalMinutes = (slot) * 30
+        val endTotalMinutes = startTotalMinutes + 30
+
+        val startHour24 = (startTotalMinutes / 60) % 24
+        val startMin = startTotalMinutes % 60
+
+        val endHour24 = (endTotalMinutes / 60) % 24
+        val endMin = endTotalMinutes % 60
+
+        val is24h = DateFormat.is24HourFormat(Reflex.application)
+
+        fun formatTime(hour24: Int, min: Int): String {
+            val minStr = if (min < 10) "0$min" else "$min"
+            return if (is24h) {
+                val hourStr = if (hour24 < 10) "0$hour24" else "$hour24"
+                "$hourStr:$minStr"
+            } else {
+                val hour12 = if (hour24 % 12 == 0) 12 else hour24 % 12
+                val ampm = if (hour24 < 12) "AM" else "PM"
+                "$hour12:$minStr $ampm"
+            }
+        }
+
+        val startStr = formatTime(startHour24, startMin)
+        val endStr = formatTime(endHour24, endMin)
+        return "$startStr - $endStr"
+    }
+
+    private fun TextView.avgStressText(value: Int) {
+        if (value <= 0) {
+            this.text = "--"
+            return
+        }
+        val span1 = SpannableString("$value ")
+        span1.setSpan(
+            RelativeSizeSpan(1f), 0,
+            span1.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        val unit = "Avg. Stress"
+        val span2 = SpannableString(unit)
+        span2.setSpan(
+            RelativeSizeSpan(0.7f), 0,
+            span2.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        val text = TextUtils.concat(span1, span2)
+        val builder = SpannableStringBuilder()
+        builder.append(text)
+        this.text = builder
+    }
+
+    companion object {
+        fun attach(
+            barChart: BarChart,
+            total: Int,
+            slotAverageMap: LinkedHashMap<Int, Float>,
+            isDayView: Boolean,
+            currentBaseDate: Date?,
+            scope: SummaryScope
+        ) {
+            StressBarsSpindleView(barChart).attach(total, slotAverageMap ,isDayView, currentBaseDate,scope)
+        }
+    }
+}
