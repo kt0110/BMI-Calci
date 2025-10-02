@@ -1,0 +1,1517 @@
+package fastrack.reflex.viewmodel
+
+import android.app.Application
+import android.text.format.DateUtils
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.Observer
+import com.github.mikephil.charting.components.AxisBase
+import com.github.mikephil.charting.formatter.ValueFormatter
+import fastrack.reflex.api.NetworkCall
+import fastrack.reflex.api.Resource
+import fastrack.reflex.api.RetrofitBuilder
+import fastrack.reflex.api.model.ServerAllHealthData
+import fastrack.reflex.api.saveMonthDataFromModel
+import fastrack.reflex.db.AppDatabase
+import fastrack.reflex.db.entity.HRV
+import fastrack.reflex.db.entity.HeartRate
+import fastrack.reflex.db.entity.RespiratoryRate
+import fastrack.reflex.db.entity.Sleep
+import fastrack.reflex.fragment.SleepType
+import fastrack.reflex.getHeartRate
+import fastrack.reflex.getSleep
+import fastrack.reflex.isOnline
+import fastrack.reflex.preference.SharedPreference
+import fastrack.reflex.widget.SummaryScope
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import titan.commons.MONTH
+import titan.commons.WearableProduct
+import titan.commons.atEndOfDay
+import titan.commons.atStartOfDay
+import titan.commons.getCalendarFromDate
+import titan.commons.getCurrentMinute
+import titan.commons.getLocalCalendar
+import titan.commons.getTodayCalendar
+import titan.commons.isInFuture
+import titan.commons.isSameDay
+import titan.commons.isSameMonthAndSameYear
+import titan.commons.monthEndsOn
+import titan.commons.monthStartsOn
+import titan.commons.preference.getProductPreferenceOrNull
+import titan.commons.toCalendar
+import titan.commons.toMilliSeconds
+import titan.commons.weekEndsOn
+import titan.commons.weekStartsOn
+import titan.commons.y4_M2_d2
+import java.util.Calendar
+import java.util.Date
+import java.util.TreeMap
+import java.util.concurrent.TimeUnit
+import kotlin.math.round
+
+/**
+ * Created by Raviteja Gadipudi.
+ * Titan Company Ltd
+ */
+
+class SleepViewModel(app: Application) : BaseAndroidViewModel(app) {
+    private val ioDispatcher = CoroutineScope(Dispatchers.IO)
+    private val mainDispatcher = CoroutineScope(Dispatchers.Main)
+    private val graphDetails = MutableLiveData<SleepGraphModel?>()
+    private val avgHrvValue = MutableLiveData<Int?>()
+    private val avgRrValue = MutableLiveData<Int?>()
+    val progress = MutableLiveData<Boolean?>()
+    private var currentRequest: Date? = null
+    private var dataLoaded = false
+    private var dataUpdate = false
+    var currentScope: SummaryScope = SummaryScope.DAY
+    var dayDate: Calendar = getTodayCalendar()
+    var weekDate: Calendar = Calendar.getInstance().apply {
+        time = getTodayCalendar().time.weekStartsOn()
+    }
+    var monthDate: Calendar = Calendar.getInstance().apply {
+        time = getTodayCalendar().time.monthStartsOn()
+    }
+
+    fun showProgress(): MutableLiveData<Boolean?> {
+        return progress
+    }
+
+    private val dataCache = ArrayList<SleepGraphModel>()
+    private var sleepRetriever: LiveData<List<Sleep>>? = null
+    private var hrvRetriever: LiveData<List<HRV>>? = null
+    private var rrRetriever: LiveData<List<RespiratoryRate>>? = null
+    private val dateOfRegistration =
+        SharedPreference.accountCreatedOn.toCalendar().time.atStartOfDay()
+
+    private val dataSyncDao = AppDatabase.instance.dataSync()
+    private val sleepDao = AppDatabase.instance.sleep()
+    private val hrvDao = AppDatabase.instance.hrv()
+    private val rrDao = AppDatabase.instance.respiratoryRate()
+
+    fun averageRR(): MutableLiveData<Int?> {
+        return avgRrValue
+    }
+
+    fun averageHrv(): MutableLiveData<Int?> {
+        return avgHrvValue
+    }
+
+    fun graphDetails(): MutableLiveData<SleepGraphModel?> {
+        return graphDetails
+    }
+
+    override fun onCleared() {
+        sleepRetriever?.removeObserver(sleepObserver)
+        rrRetriever?.removeObserver(rrObserver)
+        hrvRetriever?.removeObserver(hrvObserver)
+    }
+
+    fun setDate(date: Date) {
+        when (currentScope) {
+            SummaryScope.DAY -> {
+                dayDate = getCalendarFromDate(date.atStartOfDay())
+            }
+
+            SummaryScope.WEEK -> {
+                weekDate = getCalendarFromDate(date.atStartOfDay()).apply {
+                    add(Calendar.DAY_OF_YEAR, -6)
+                }
+            }
+
+            SummaryScope.MONTH -> {
+                monthDate = getCalendarFromDate(date.atStartOfDay().monthStartsOn())
+            }
+        }
+        processData()
+    }
+
+    fun previous() {
+        when (currentScope) {
+            SummaryScope.DAY -> {
+                dayDate.add(Calendar.DAY_OF_YEAR, -1)
+                if (dayDate.time.before(dateOfRegistration)) {
+                    dayDate.add(Calendar.DAY_OF_YEAR, 1)
+                    return
+                }
+            }
+
+            SummaryScope.WEEK -> {
+                if (weekDate.time == dateOfRegistration) {
+                    return
+                }
+                weekDate.add(Calendar.DAY_OF_YEAR, -7)
+                if (weekDate.time.before(dateOfRegistration) && dateOfRegistration !in weekDate.time.weekStartsOn()..weekDate.time.weekEndsOn()) {
+                    weekDate.add(Calendar.DAY_OF_YEAR, 7)
+                    return
+                }
+            }
+
+            SummaryScope.MONTH -> {
+                if (monthDate.time.isSameMonthAndSameYear(dateOfRegistration)) {
+                    return
+                }
+                monthDate.add(Calendar.MONTH, -1)
+            }
+        }
+        processData()
+    }
+
+    fun next() {
+        when (currentScope) {
+            SummaryScope.DAY -> {
+                if (DateUtils.isToday(dayDate.timeInMillis)) {
+                    return
+                }
+                dayDate.add(Calendar.DAY_OF_YEAR, 1)
+            }
+
+            SummaryScope.WEEK -> {
+                weekDate.add(Calendar.DAY_OF_YEAR, 7)
+                if (weekDate.time.after(Date().atEndOfDay())) {
+                    weekDate.add(Calendar.DAY_OF_YEAR, -7)
+                    if (!weekDate.time.isSameDay(Date().weekEndsOn())) {
+                        weekDate.timeInMillis = Date().atStartOfDay().weekStartsOn().time
+                    } else {
+                        return
+                    }
+                }
+            }
+
+            SummaryScope.MONTH -> {
+                monthDate.add(Calendar.MONTH, 1)
+                if (monthDate.time.after(Date())) {
+                    monthDate.add(Calendar.MONTH, -1)
+                    if (!monthDate.time.isSameDay(Date().monthEndsOn())) {
+                        monthDate.timeInMillis = Date().atStartOfDay().monthStartsOn().time
+                    } else {
+                        return
+                    }
+                }
+            }
+        }
+        processData()
+    }
+
+    fun selectedScope(scope: SummaryScope) {
+        if (currentScope != scope) {
+            currentScope = scope
+            processData()
+        }
+    }
+
+    private fun processData() {
+        sleepRetriever?.removeObserver(sleepObserver)
+        rrRetriever?.removeObserver(rrObserver)
+        hrvRetriever?.removeObserver(hrvObserver)
+        dataLoaded = false
+        when (currentScope) {
+            SummaryScope.DAY -> {
+                val date = dayDate.time.atStartOfDay()
+                val cachedData =
+                    dataCache.firstOrNull { it.date == date && it.scope == currentScope }
+                        ?: SleepGraphModel(
+                            date = date,
+                            scope = currentScope
+                        ).apply {
+                            dataCache.add(this)
+                        }
+                cachedData.isChanged = true
+                update(cachedData)
+                sleepRetriever = sleepDao.getAsLiveData(
+                    date.atStartOfDay(),
+                    date.atEndOfDay()
+                )
+                hrvRetriever = hrvDao.getAsLiveData(date.atStartOfDay(), date.atEndOfDay())
+                rrRetriever = rrDao.getAsLiveData(date.atStartOfDay(), date.atEndOfDay())
+                rrRetriever?.observeForever(rrObserver)
+                hrvRetriever?.observeForever(hrvObserver)
+                sleepRetriever?.observeForever(sleepObserver)
+                checkIfDataSynced(date)
+            }
+
+            SummaryScope.WEEK -> {
+                val startDate = weekDate.time.atStartOfDay()
+                val endDate = getCalendarFromDate(startDate).apply {
+                    add(Calendar.DAY_OF_YEAR, 6)
+                }.time
+                val cachedData =
+                    dataCache.firstOrNull { it.date == startDate && it.scope == currentScope }
+                        ?: SleepGraphModel(
+                            date = startDate,
+                            scope = currentScope
+                        ).apply {
+                            dataCache.add(this)
+                        }
+                cachedData.isChanged = true
+                update(cachedData)
+                sleepRetriever = sleepDao.getAsLiveData(
+                    startDate,
+                    endDate
+                )
+
+                sleepRetriever?.observeForever(sleepObserver)
+                hrvRetriever = hrvDao.getAsLiveData(startDate, endDate)
+                rrRetriever = rrDao.getAsLiveData(startDate, endDate)
+                rrRetriever?.observeForever(rrObserver)
+                hrvRetriever?.observeForever(hrvObserver)
+                checkIfDataSynced(startDate)
+                checkIfDataSynced(endDate)
+            }
+
+            SummaryScope.MONTH -> {
+                val startDate = monthDate.time.monthStartsOn().atStartOfDay()
+                val endDate = monthDate.time.monthEndsOn().atStartOfDay()
+                val cachedData =
+                    dataCache.firstOrNull { it.date == startDate && it.scope == currentScope }
+                        ?: SleepGraphModel(
+                            date = startDate,
+                            scope = currentScope
+                        ).apply {
+                            dataCache.add(this)
+                        }
+                cachedData.isChanged = true
+                update(cachedData)
+                sleepRetriever = sleepDao.getAsLiveData(
+                    startDate,
+                    endDate
+                )
+                sleepRetriever?.observeForever(sleepObserver)
+                hrvRetriever = hrvDao.getAsLiveData(startDate, endDate)
+                rrRetriever = rrDao.getAsLiveData(startDate, endDate)
+                rrRetriever?.observeForever(rrObserver)
+                hrvRetriever?.observeForever(hrvObserver)
+                checkIfDataSynced(startDate)
+            }
+        }
+    }
+
+    private fun checkIfDataSynced(date: Date) {
+        ioDispatcher.launch {
+            val data = dataSyncDao.get(date.monthStartsOn())
+            if (data == null || !data.sleep) {
+                getMonthlySleep(date.monthStartsOn())
+            }
+        }
+    }
+
+    private fun loaders(show: Boolean) {
+        mainDispatcher.launch {
+            progress.value = show
+        }
+    }
+
+    private fun getMonthlySleep(date: Date) {
+        if (currentRequest?.time != date.monthStartsOn().time) {
+            getContext().let {
+                if (isOnline(it)) {
+                    mainDispatcher.launch {
+                        currentRequest = date.monthStartsOn()
+                        val params = HashMap<String, String>()
+                        params["scope"] = MONTH
+                        params["date"] = y4_M2_d2.format(date)
+                        NetworkCall<ServerAllHealthData>().makeCall(
+                            RetrofitBuilder.sessionService.getAllHealthData(params)
+                        ).observeForever { result ->
+                            when (result.status) {
+                                Resource.Status.SUCCESS -> {
+                                    if (currentScope != SummaryScope.DAY) {
+                                        sleepRetriever?.removeObserver(sleepObserver)
+                                        rrRetriever?.removeObserver(rrObserver)
+                                        hrvRetriever?.removeObserver(hrvObserver)
+                                    }
+                                    ioDispatcher.launch {
+                                        result.data?.saveMonthDataFromModel(date)
+                                        mainDispatcher.launch {
+                                            if (currentScope != SummaryScope.DAY) {
+                                                sleepRetriever?.observeForever(sleepObserver)
+                                                rrRetriever?.observeForever(rrObserver)
+                                                hrvRetriever?.observeForever(hrvObserver)
+                                            }
+                                            loaders(false)
+                                        }
+                                    }
+                                }
+
+                                Resource.Status.ERROR -> {
+                                    loaders(show = false)
+                                }
+
+                                Resource.Status.LOADING -> {
+                                    loaders(show = true)
+                                }
+                            }
+                            currentRequest = null
+                        }
+                    }
+                } else {
+                    loaders(false)
+                }
+            }
+        }
+    }
+
+    fun getDayHeartRateData(sleepGraphModel: SleepGraphModel, sleepStartTime: Long, sleepEndTime: Long, sleepStartMinOfTheDay: Int, sleepEndMinOfTheDay: Int , callback: (hrData: HeartRateGraphModel?) -> Unit) {
+        ioDispatcher.launch {
+            val heartRateDao = AppDatabase.instance.heartRate()
+            val prevDate = getPrevDayDate()
+            var list = emptyList<HeartRate>()
+            var productCode: String? = null
+            if(sleepGraphModel.products.isNotEmpty()) {
+                productCode = sleepGraphModel.products[0].code
+                 list = heartRateDao.get(
+                     from = prevDate.time.atStartOfDay(),
+                     to = dayDate.time.atEndOfDay(),
+                     product = productCode
+                )
+            }
+            if (list.isNotEmpty()) {
+                callback.invoke(processDayHeartRate(list, dayDate, prevDate, sleepStartTime, sleepEndTime , sleepStartMinOfTheDay , sleepEndMinOfTheDay , productCode))
+            } else {
+                callback.invoke(null)
+            }
+        }
+    }
+
+    private fun getPrevDayDate() = (dayDate.clone() as Calendar).apply {
+        add(Calendar.DAY_OF_YEAR, -1)
+    }
+
+    private fun processDayHeartRate(
+        list: List<HeartRate>?,
+        dayDate: Calendar,
+        prevDate: Calendar,
+        sleepStartTime: Long,
+        sleepEndTime: Long,
+        sleepStartMinOfTheDay: Int,
+        sleepEndMinOfTheDay: Int,
+        productCode: String?
+    ) : HeartRateGraphModel {
+        val data = HeartRateGraphModel( date = dayDate.time, scope = currentScope)
+        data.isChanged = false
+        if (list != null) {
+            val heartRate = getHeartRate(list, dayDate.time, productCode)
+            val prevDayHeartRate = getHeartRate(list, prevDate.time, productCode)
+            if (heartRate != null) {
+                val allHeartRateData = getHeartRateFinalList(heartRate, prevDayHeartRate)
+                val finalList = TreeMap<Long, Int>()
+                allHeartRateData.forEach { (timestamp, hrValue) ->
+                    if (timestamp in sleepStartTime..sleepEndTime) {
+                        finalList[timestamp] = hrValue
+                    }
+                }
+                val avgList = ArrayList<Int>()
+                val combo = LinkedHashMap<Int, Int>()
+                if (finalList.isNotEmpty()) {
+                    val calendar = getCalendarFromDate(Date(sleepStartTime)).apply {
+                        set(Calendar.SECOND, 0)
+                        set(Calendar.MILLISECOND, 0)
+                    }
+                    var miss = 0
+                    val combineDataInterval = 60
+                    for (i in sleepStartMinOfTheDay..sleepEndMinOfTheDay) {
+                        val hr = finalList[calendar.timeInMillis] ?: 0
+                        if (hr > 0) {
+                            miss = 0
+                            combo[i] = hr
+                            avgList.add(hr)
+                        } else {
+                            if (miss < combineDataInterval) {
+                                combo[i] = 0
+                            } else {
+                                combo[i] = -1
+                            }
+                            miss++
+                        }
+                        calendar.add(Calendar.MINUTE, 1)
+                    }
+                }
+                data.setHeartRateEntry(combo)
+                data.setValues(
+                    finalList.values.maxOrNull() ?: 0,
+                    heartRate.rest,
+                    avgList.average().toInt()
+                )
+            }
+        }
+        return data
+    }
+
+    private fun getHeartRateFinalList(heartRate: HeartRate?, prevDayHeartRate: HeartRate?): TreeMap<Long, Int> {
+    return TreeMap<Long, Int>().apply {
+        prevDayHeartRate?.let { hc ->
+            hc.details.forEach {
+                this[getCalendarFromDate(Date(it.key)).apply {
+                    set(Calendar.SECOND, 0)
+                }.timeInMillis] = it.value
+            }
+            hc.msHRDetails.forEach { key ->
+                key.value.forEach {
+                    this[getCalendarFromDate(Date(it.key)).apply {
+                        set(Calendar.SECOND, 0)
+                    }.timeInMillis] = it.value
+                }
+            }
+        }
+        heartRate?.let { hc ->
+            hc.details.forEach {
+                this[getCalendarFromDate(Date(it.key)).apply {
+                    set(Calendar.SECOND, 0)
+                }.timeInMillis] = it.value
+            }
+            hc.msHRDetails.forEach { key ->
+                key.value.forEach {
+                    this[getCalendarFromDate(Date(it.key)).apply {
+                        set(Calendar.SECOND, 0)
+                    }.timeInMillis] = it.value
+                }
+            }
+        }
+    }
+}
+
+    private fun update(data: SleepGraphModel) {
+        if (data.isChanged) {
+            graphDetails().value = data.apply {
+                isUpdate = dataUpdate
+                isLoading = false
+            }
+        }
+    }
+
+    private fun updateLoading(data: SleepGraphModel, loading: Boolean) {
+        if (data.isChanged) {
+            graphDetails().value = data.apply {
+                isUpdate = dataUpdate
+                isLoading = loading
+            }
+        }
+    }
+
+    private val rrObserver = Observer<List<RespiratoryRate>> { list ->
+        if (!dataLoaded) {
+            dataLoaded = true
+            dataUpdate = false
+        } else {
+            dataUpdate = true
+        }
+        when (currentScope) {
+            SummaryScope.DAY -> {
+                processDayRr(list)
+            }
+
+            SummaryScope.WEEK -> {
+                processWeekRr(list)
+            }
+
+            SummaryScope.MONTH -> {
+                processMonthRr(list)
+            }
+        }
+    }
+
+    private val hrvObserver = Observer<List<HRV>> { list ->
+        if (!dataLoaded) {
+            dataLoaded = true
+            dataUpdate = false
+        } else {
+            dataUpdate = true
+        }
+        when (currentScope) {
+            SummaryScope.DAY -> {
+                processDayHrv(list)
+            }
+
+            SummaryScope.WEEK -> {
+                processWeekHrv(list)
+            }
+
+            SummaryScope.MONTH -> {
+                processMonthHrv(list)
+            }
+        }
+    }
+
+    private val sleepObserver = Observer<List<Sleep>> { list ->
+        if (!dataLoaded) {
+            dataLoaded = true
+            dataUpdate = false
+        } else {
+            dataUpdate = true
+        }
+        when (currentScope) {
+            SummaryScope.DAY -> {
+                processDaySleep(list)
+            }
+
+            SummaryScope.WEEK -> {
+                processWeekSleep(list)
+            }
+
+            SummaryScope.MONTH -> {
+                //processMonthSleep(list)
+                processCompleteMonthSleep(list)
+            }
+        }
+    }
+
+    private fun processCompleteMonthSleep(list: List<Sleep>?) {
+        ioDispatcher.launch {
+            val startDate = getCalendarFromDate(monthDate.time.monthStartsOn().atStartOfDay()).time
+            val todaySleepGoal = getProductPreferenceOrNull()?.sleepGoal ?: 420
+            val max = monthDate.getActualMaximum(Calendar.DAY_OF_MONTH)
+            val date = SharedPreference.accountCreatedOn
+
+            val data = dataCache.firstOrNull { it.date == startDate && it.scope == currentScope }
+                ?: SleepGraphModel(date = startDate, scope = currentScope).apply {
+                    dataCache.add(this)
+                }
+
+            data.isChanged = false
+            val listOfProducts: ArrayList<WearableProduct> = arrayListOf()
+            val combo = LinkedHashMap<Int, SleepModel>()
+            val totalSleep = arrayListOf<Int>()
+            val totalLightSleep = arrayListOf<Int>()
+            val totalDeepSleep = arrayListOf<Int>()
+            val totalAwakeSleep = arrayListOf<Int>()
+            val totalTimeToFallSleep = arrayListOf<Int>()
+            val totalRemSleep = arrayListOf<Int>()
+            val totalNapSleep = arrayListOf<Int>()
+            val totalSleepDebt = arrayListOf<Int>()
+            val score = arrayListOf<Int>()
+
+            var totalTarget = 0
+            var totalMonthTarget = 0
+
+            val calendar = getCalendarFromDate(startDate)
+
+            if (list != null) {
+
+                for (i in 1..max) {
+                    val currentDate = calendar.time
+                    val sleep = getSleep(list, currentDate)
+                    val lastSleep = sleepDao.getLastSleepData(currentDate, Date().atEndOfDay())
+
+                    if (!currentDate.isInFuture() && date <= calendar.timeInMillis) {
+                        if (sleep != null && sleep.getTotalSleep() > 0) {
+                            WearableProduct.getProduct(sleep.product)?.let {
+                                listOfProducts.add(it)
+                            }
+
+                            combo[i] = SleepModel(
+                                deepSleep = sleep.deep,
+                                lightSleep = sleep.light,
+                                awakeSleep = sleep.awake,
+                                timeToFallSleep = sleep.ttfs,
+                                remSleep = sleep.rem,
+                                target = sleep.target,
+                                napSleep = sleep.nap
+                            )
+
+                            score.add(sleep.score)
+                            totalSleep.add(sleep.getTotalSleep())
+                            totalLightSleep.add(sleep.light)
+                            totalDeepSleep.add(sleep.deep)
+                            totalAwakeSleep.add(sleep.awake)
+                            totalTimeToFallSleep.add(sleep.ttfs)
+                            totalRemSleep.add(sleep.rem)
+                            totalNapSleep.add(sleep.nap)
+
+                            val sleepDebt = sleep.target - sleep.getTotalSleep()
+                            if (sleepDebt > 0) totalSleepDebt.add(sleepDebt)
+
+                            totalTarget += sleep.target
+                            totalMonthTarget += sleep.target
+                            saveDayRecord(
+                                date = sleep.date,
+                                details = sleep.details
+                            )
+                        } else {
+                            val fallbackTarget = lastSleep?.target ?: todaySleepGoal
+
+                            combo[i] = SleepModel(
+                                deepSleep = 0,
+                                lightSleep = 0,
+                                awakeSleep = 0,
+                                timeToFallSleep = 0,
+                                remSleep = 0,
+                                target = fallbackTarget,
+                                napSleep = 0
+                            )
+
+                            totalTarget += fallbackTarget
+                            totalMonthTarget += fallbackTarget
+                            totalSleepDebt.add(fallbackTarget)
+                        }
+
+                        WearableProduct.getProduct(lastSleep?.product)?.let {
+                            listOfProducts.add(it)
+                        }
+                    }
+
+                    calendar.add(Calendar.DAY_OF_YEAR, 1)
+                }
+
+                data.setDataCombo(
+                    listOfProducts.distinct(),
+                    combo,
+                    totalSleep.average().toInt(),
+                    totalTarget,
+                    totalMonthTarget,
+                    totalSleepDebt.sum()
+                )
+
+                data.setTotals(
+                    round(totalDeepSleep.average()).toInt(),
+                    round(totalLightSleep.average()).toInt(),
+                    round(totalAwakeSleep.average()).toInt(),
+                    round(totalTimeToFallSleep.average()).toInt(),
+                    round(totalRemSleep.average()).toInt(),
+                    score.average().toInt(),
+                    round(totalNapSleep.average()).toInt()
+                )
+            }
+
+
+            mainDispatcher.launch {
+                update(data)
+            }
+        }
+    }
+
+
+    //TODO it can be removed later
+    private fun processMonthSleep(list: List<Sleep>?) {
+        ioDispatcher.launch {
+            val startDate = getCalendarFromDate(monthDate.time.monthStartsOn().atStartOfDay()).time
+            val todaySleepGoal = getProductPreferenceOrNull()?.sleepGoal ?: 420
+            val max = monthDate.getActualMaximum(Calendar.DAY_OF_MONTH)
+            val date = SharedPreference.accountCreatedOn
+            val data =
+                dataCache.firstOrNull { it.date == startDate && it.scope == currentScope }
+                    ?: SleepGraphModel(
+                        date = startDate,
+                        scope = currentScope
+                    ).apply {
+                        dataCache.add(this)
+                    }
+            data.isChanged = false
+            val listOfProducts: ArrayList<WearableProduct> = arrayListOf()
+            if (list != null) {
+                val calendar = getCalendarFromDate(startDate)
+                val combo = LinkedHashMap<Int, SleepModel>()
+                var (lightSleep, deepSleep) = Pair(0, 0)
+                var (awakeSleep, remSleep) = Pair(0, 0)
+                var (napSleep, timeToFallSleep) = Pair(0, 0)
+                var (weeklyTarget, totalTarget, totalMonthTarget) = Triple(0, 0, 0)
+                val totalSleep: ArrayList<Int> = arrayListOf()
+                val totalLightSleep: ArrayList<Int> = arrayListOf()
+                val totalDeepSleep: ArrayList<Int> = arrayListOf()
+                val totalAwakeSleep: ArrayList<Int> = arrayListOf()
+                val totalTimeToFallSleep: ArrayList<Int> = arrayListOf()
+                val totalRemSleep: ArrayList<Int> = arrayListOf()
+                val totalSleepDebt: ArrayList<Int> = arrayListOf()
+                val totalNapSleep: ArrayList<Int> = arrayListOf()
+                val score: ArrayList<Int> = arrayListOf()
+                var currentSleepGoal: Int
+                var index = 1
+                for (i in 1..max) {
+                    val sleep = getSleep(list, calendar.time)
+                    val lastSleep = sleepDao.getLastSleepData(calendar.time, Date().atEndOfDay())
+                    if (sleep != null && (sleep.getTotalSleep() > 0) &&
+                        !calendar.time.isInFuture() &&
+                        date <= calendar.timeInMillis
+                    ) {
+                        WearableProduct.getProduct(sleep.product)?.let {
+                            listOfProducts.add(it)
+                        }
+                        lightSleep += sleep.light
+                        deepSleep += sleep.deep
+                        awakeSleep += sleep.awake
+                        timeToFallSleep += sleep.ttfs
+                        remSleep += sleep.rem
+                        napSleep += sleep.nap
+                        currentSleepGoal = sleep.target
+                        score.add(sleep.score)
+                        totalSleep.add(sleep.getTotalSleep())
+                        totalLightSleep.add(sleep.light)
+                        totalDeepSleep.add(sleep.deep)
+                        totalAwakeSleep.add(sleep.awake)
+                        totalTimeToFallSleep.add(sleep.ttfs)
+                        totalRemSleep.add(sleep.rem)
+                        totalNapSleep.add(sleep.nap)
+                        val sleepDebt = currentSleepGoal - sleep.getTotalSleep()
+                        if (sleepDebt > 0) {
+                            totalSleepDebt.add(sleepDebt)
+                        }
+                        totalTarget += currentSleepGoal
+                        weeklyTarget += currentSleepGoal
+                        totalMonthTarget += currentSleepGoal
+                    } else if (date <= calendar.timeInMillis) {
+                        if (!calendar.time.isInFuture()) {
+                            totalTarget += lastSleep?.target ?: todaySleepGoal
+                        }
+                        weeklyTarget += lastSleep?.target ?: todaySleepGoal
+                        totalMonthTarget += lastSleep?.target ?: todaySleepGoal
+                        totalSleepDebt.add(lastSleep?.target ?: todaySleepGoal)
+                    }
+                    if ((i) % 7 == 0 || i == max) {
+                        combo[index++] = SleepModel(
+                            deepSleep = deepSleep,
+                            lightSleep = lightSleep,
+                            awakeSleep = awakeSleep,
+                            timeToFallSleep = timeToFallSleep,
+                            remSleep = remSleep,
+                            target = weeklyTarget,
+                            napSleep = napSleep
+                        )
+                        deepSleep = 0
+                        lightSleep = 0
+                        awakeSleep = 0
+                        timeToFallSleep = 0
+                        remSleep = 0
+                        weeklyTarget = 0
+                        napSleep = 0
+                    }
+                    calendar.add(Calendar.DAY_OF_YEAR, 1)
+                }
+                data.setDataCombo(
+                    listOfProducts.distinct(),
+                    combo,
+                    totalSleep.average().toInt(),
+                    totalTarget,
+                    totalMonthTarget,
+                    totalSleepDebt.sum()
+                )
+                data.setTotals(
+                    round(totalDeepSleep.average()).toInt(),
+                    round(totalLightSleep.average()).toInt(),
+                    round(totalAwakeSleep.average()).toInt(),
+                    round(totalTimeToFallSleep.average()).toInt(),
+                    round(totalRemSleep.average()).toInt(),
+                    score.average().toInt(),
+                    round(totalNapSleep.average()).toInt()
+                )
+            } else {
+                val calendar = getCalendarFromDate(startDate)
+                val combo = LinkedHashMap<Int, SleepModel>()
+                var (weeklyTarget, totalTarget, totalMonthTarget) = Triple(0, 0, 0)
+                var index = 1
+                for (i in 1..max) {
+                    val lastSleep = sleepDao.getLastSleepData(calendar.time, Date().atEndOfDay())
+                    if (date <= calendar.timeInMillis) {
+                        if (!calendar.time.isInFuture()) {
+                            totalTarget += lastSleep?.target ?: todaySleepGoal
+                        }
+                        weeklyTarget += lastSleep?.target ?: todaySleepGoal
+                        totalMonthTarget += lastSleep?.target ?: todaySleepGoal
+                    }
+                    WearableProduct.getProduct(lastSleep?.product)?.let {
+                        listOfProducts.add(it)
+                    }
+                    if ((i) % 7 == 0 || i == max) {
+                        combo[index++] = SleepModel(0, 0, 0, 0, 0, 0, weeklyTarget)
+                    }
+                    calendar.add(Calendar.DAY_OF_YEAR, 1)
+                }
+                data.setDataCombo(
+                    listOfProducts.distinct(),
+                    combo,
+                    0,
+                    totalTarget,
+                    totalMonthTarget,
+                    0
+                )
+                data.setTotals(0, 0, 0, 0, 0, 0, 0)
+            }
+            mainDispatcher.launch {
+                update(data)
+            }
+        }
+    }
+
+    private fun processWeekSleep(list: List<Sleep>?) {
+        ioDispatcher.launch {
+            val todaySleepGoal = getProductPreferenceOrNull()?.sleepGoal ?: 420
+            val date = SharedPreference.accountCreatedOn
+            val startDate = weekDate.time.atStartOfDay()
+            val data =
+                dataCache.firstOrNull { it.date == startDate && it.scope == currentScope }
+                    ?: SleepGraphModel(
+                        date = startDate,
+                        scope = currentScope
+                    ).apply {
+                        dataCache.add(this)
+                    }
+            data.isChanged = false
+            val listOfProducts: ArrayList<WearableProduct> = arrayListOf()
+            if (list != null) {
+                val calendar = getCalendarFromDate(startDate)
+                val combo = LinkedHashMap<Int, SleepModel>()
+                var (lightSleep, deepSleep) = Pair(0, 0)
+                var (awakeSleep, remSleep) = Pair(0, 0)
+                var (napSleep, timeToFallSleep) = Pair(0, 0)
+                var totalTarget = 0
+                var totalWeekTarget = 0
+                val totalSleep: ArrayList<Int> = arrayListOf()
+                val totalLightSleep: ArrayList<Int> = arrayListOf()
+                val totalDeepSleep: ArrayList<Int> = arrayListOf()
+                val totalRemSleep: ArrayList<Int> = arrayListOf()
+                val totalAwakeSleep: ArrayList<Int> = arrayListOf()
+                val totalTimeToFallSleep: ArrayList<Int> = arrayListOf()
+                val totalNapSleep: ArrayList<Int> = arrayListOf()
+                var totalSleepDebt = 0
+                val score: ArrayList<Int> = arrayListOf()
+                var currentSleepGoal: Int
+                for (i in 1..7) {
+                    val sleep = getSleep(list, calendar.time)
+                    val lastSleep = sleepDao.getLastSleepData(calendar.time, Date().atEndOfDay())
+                    if (sleep != null && (sleep.getTotalSleep() > 0) &&
+                        !calendar.time.isInFuture() &&
+                        date <= calendar.timeInMillis
+                    ) {
+
+                        WearableProduct.getProduct(sleep.product)?.let {
+                            listOfProducts.add(it)
+                        }
+                        lightSleep += sleep.light
+                        deepSleep += sleep.deep
+                        awakeSleep += sleep.awake
+                        timeToFallSleep += sleep.ttfs
+                        remSleep += sleep.rem
+                        napSleep += sleep.nap
+                        currentSleepGoal = sleep.target
+                        score.add(sleep.score)
+                        totalSleep.add(sleep.getTotalSleep())
+                        totalLightSleep.add(sleep.light)
+                        totalDeepSleep.add(sleep.deep)
+                        totalRemSleep.add(sleep.rem)
+                        totalAwakeSleep.add(sleep.awake)
+                        totalTimeToFallSleep.add(sleep.ttfs)
+                        totalNapSleep.add(sleep.nap)
+                        val sleepDebt = currentSleepGoal - sleep.getTotalSleep()
+                        if (sleepDebt > 0) {
+                            totalSleepDebt += sleepDebt
+                        }
+                        totalTarget += currentSleepGoal
+                        totalWeekTarget += currentSleepGoal
+                        combo[i] =
+                            SleepModel(
+                                deepSleep = sleep.deep,
+                                lightSleep = sleep.light,
+                                awakeSleep = sleep.awake,
+                                timeToFallSleep = sleep.ttfs,
+                                remSleep = sleep.rem,
+                                target = currentSleepGoal,
+                                napSleep = sleep.nap
+                            )
+                        saveDayRecord(
+                            date = sleep.date,
+                            details = sleep.details
+                        )
+                    } else {
+                        if (date <= calendar.timeInMillis) {
+                            if (!calendar.time.isInFuture()) {
+                                totalTarget += lastSleep?.target ?: todaySleepGoal
+                            }
+                            totalWeekTarget += lastSleep?.target ?: todaySleepGoal
+                            totalSleepDebt += lastSleep?.target ?: todaySleepGoal
+                        }
+                        combo[i] = SleepModel(
+                            0, 0, 0, 0, 0, 0, if (date <= calendar.timeInMillis) {
+                                lastSleep?.target ?: todaySleepGoal
+                            } else {
+                                -1
+                            }
+                        )
+                    }
+                    calendar.add(Calendar.DAY_OF_YEAR, 1)
+                }
+                data.setDataCombo(
+                    listOfProducts.distinct(),
+                    combo,
+                    totalSleep.average().toInt(),
+                    totalTarget,
+                    totalWeekTarget,
+                    totalSleepDebt
+                )
+                data.setTotals(
+                    round(totalDeepSleep.average()).toInt(),
+                    round(totalLightSleep.average()).toInt(),
+                    round(totalAwakeSleep.average()).toInt(),
+                    round(totalTimeToFallSleep.average()).toInt(),
+                    round(totalRemSleep.average()).toInt(),
+                    score.average().toInt(),
+                    round(totalNapSleep.average()).toInt()
+                )
+            } else {
+                val calendar = getCalendarFromDate(startDate)
+                val combo = LinkedHashMap<Int, SleepModel>()
+                var totalTarget = 0
+                var totalWeekTarget = 0
+                for (i in 1..7) {
+                    val lastSleep = sleepDao.getLastSleepData(calendar.time, Date().atEndOfDay())
+                    if (date <= calendar.timeInMillis) {
+                        if (!calendar.time.isInFuture()) {
+                            totalTarget += lastSleep?.target ?: todaySleepGoal
+                        }
+                        totalWeekTarget += lastSleep?.target ?: todaySleepGoal
+                    }
+                    WearableProduct.getProduct(lastSleep?.product)?.let {
+                        listOfProducts.add(it)
+                    }
+                    combo[i] = SleepModel(
+                        0, 0, 0, 0, 0, 0, if (date <= calendar.timeInMillis) {
+                            lastSleep?.target ?: todaySleepGoal
+                        } else {
+                            -1
+                        }
+                    )
+                    calendar.add(Calendar.DAY_OF_YEAR, 1)
+                }
+                data.setDataCombo(
+                    listOfProducts.distinct(),
+                    combo,
+                    0,
+                    totalTarget,
+                    totalWeekTarget,
+                    0
+                )
+                data.setTotals(0, 0, 0, 0, 0, 0, 0)
+            }
+            mainDispatcher.launch {
+                update(data)
+            }
+        }
+    }
+
+    private fun saveDayRecord(
+        date: Date,
+        details: TreeMap<Long, fastrack.reflex.db.entity.SleepDetails>?
+    ) {
+        val key = date.toString()
+        val record = buildRecordString(details)
+        val updatedMap = SharedPreference.sleepRecordMap.toMutableMap()
+        updatedMap[key] = record
+        SharedPreference.sleepRecordMap = updatedMap
+    }
+
+    private fun buildRecordString(details: TreeMap<Long, fastrack.reflex.db.entity.SleepDetails>?): String {
+        if (details.isNullOrEmpty()) return ""
+        val start = details.firstKey()
+        val lastKey = details.lastKey()
+        val lastDurMin = details[lastKey]?.duration ?: 0
+        val end = lastKey + lastDurMin * 60_000L
+        return "$start,$end"
+    }
+
+
+    private fun updateHrv(average: Int) {
+        mainDispatcher.launch {
+            averageHrv().value = average
+        }
+    }
+
+    private fun updateRr(average: Int) {
+        mainDispatcher.launch {
+            averageRR().value = average
+        }
+    }
+
+    private fun processDayHrv(list: List<HRV>?) {
+        ioDispatcher.launch {
+            if (list == null) {
+                updateHrv(0)
+            } else {
+                val values = arrayListOf<Int>()
+                list.forEach {
+                    values.addAll(it.details.values.filter { v -> v in 1 until 255 })
+                }
+                if (values.isNotEmpty()) {
+                    updateHrv(values.average().toInt())
+                } else {
+                    updateHrv(0)
+                }
+            }
+        }
+    }
+
+    private fun processDayRr(list: List<RespiratoryRate>?) {
+        ioDispatcher.launch {
+            if (list == null) {
+                updateRr(0)
+            } else {
+                val values = arrayListOf<Int>()
+                list.forEach {
+                    values.addAll(it.details.values.filter { v -> v in 1..100 })
+                }
+                if (values.isNotEmpty()) {
+                    updateRr(values.average().toInt())
+                } else {
+                    updateRr(0)
+                }
+            }
+        }
+    }
+
+    private fun processWeekHrv(list: List<HRV>?) {
+        ioDispatcher.launch {
+            val values = arrayListOf<Int>()
+            list?.forEach {
+                values.addAll(it.details.values)
+            }
+            val average = if (values.isNotEmpty()) values.average().toInt() else 0
+            updateHrv(average)
+        }
+    }
+
+    private fun processWeekRr(list: List<RespiratoryRate>?) {
+        ioDispatcher.launch {
+            val values = arrayListOf<Int>()
+            list?.forEach {
+                values.addAll(it.details.values)
+            }
+            val average = if (values.isNotEmpty()) values.average().toInt() else 0
+            updateRr(average)
+        }
+    }
+
+    private fun processMonthHrv(list: List<HRV>?) {
+        ioDispatcher.launch {
+            val values = arrayListOf<Int>()
+            list?.forEach {
+                values.addAll(it.details.values)
+            }
+            val average = if (values.isNotEmpty()) values.average().toInt() else 0
+            updateHrv(average)
+        }
+    }
+
+    private fun processMonthRr(list: List<RespiratoryRate>?) {
+        ioDispatcher.launch {
+            val values = arrayListOf<Int>()
+            list?.forEach {
+                values.addAll(it.details.values)
+            }
+            val average = if (values.isNotEmpty()) values.average().toInt() else 0
+            updateRr(average)
+        }
+    }
+
+    private fun processDaySleep(list: List<Sleep>?) {
+        ioDispatcher.launch {
+            val todaySleepGoal = getProductPreferenceOrNull()?.sleepGoal ?: 420
+            val data =
+                dataCache.firstOrNull { it.date == dayDate.time && it.scope == currentScope }
+                    ?: SleepGraphModel(
+                        date = dayDate.time,
+                        scope = currentScope
+                    ).apply {
+                        dataCache.add(this)
+                    }
+            data.isChanged = false
+            val lastSleep = sleepDao.getLastSleepData(dayDate.time, Date().atEndOfDay())
+            if (!list.isNullOrEmpty()) {
+                val sleep = getSleep(list, dayDate.time)
+                if (sleep != null && (sleep.getTotalSleep() > 0)) {
+                    val combo = LinkedHashMap<Int, Pair<Long, SleepType>>()
+                    val details = ArrayList<SleepDetails>()
+                    val calendar: Calendar = getCalendarFromDate(sleep.date)
+                    var startIndex = -1
+                    var startTime = -1L
+                    val sleepStartTime = getLocalCalendar()
+                    val sleepStartIndex: Int =
+                        sleep.details.filter { it.value.sleepStatus >= 0 }.keys.minOrNull()?.let {
+                            sleepStartTime.apply {
+                                timeInMillis = it
+                            }
+                            val date = Date(it)
+                            val bufferValues = date.time.getSleepStartBufferValues(sleep.date)
+                            calendar.time = bufferValues.first.time
+                            bufferValues.second
+                        } ?: 0
+                    var sleepEndIndex = 0
+                    sleep.details.keys.maxOrNull()?.let { timeInMillisSeconds ->
+                        val endCalendar = getLocalCalendar().apply {
+                            timeInMillis = timeInMillisSeconds
+                        }
+                        endCalendar.add(
+                            Calendar.MINUTE, sleep.details[timeInMillisSeconds]?.duration
+                                ?: 0
+                        )
+                        sleepEndIndex =
+                            endCalendar.timeInMillis.getSleepEndBufferValue(sleepStartTime.time)
+                    }
+                    var index = 1
+                    var sleepStatus = SleepType.NONE
+                    var duration = 0
+                    var sleepSplit = 60
+                    var splitIndex = 0
+                    for (i in sleepStartIndex..sleepEndIndex) {
+                        sleep.details[calendar.timeInMillis]?.let {
+                            duration = it.duration
+                            sleepStatus = when (it.sleepStatus) {
+                                0 -> SleepType.AWAKE
+                                1 -> SleepType.LIGHT_SLEEP
+                                2 -> SleepType.LIGHT_SLEEP
+                                3 -> SleepType.REM_SLEEP
+                                4 -> SleepType.DEEP_SLEEP
+                                5 -> SleepType.NAP
+                                6 -> SleepType.TIME_TO_FALL_SLEEP
+                                else -> SleepType.NONE
+                            }
+                        }
+                        if (startIndex == -1) {
+                            if (sleepStatus != SleepType.NONE && sleepStatus != SleepType.TIME_TO_FALL_SLEEP) {
+                                startIndex = splitIndex
+                                startTime = calendar.timeInMillis
+                            }
+                        } else if (i == sleepEndIndex) {
+                            val endIndex = splitIndex - (60 - sleepSplit)
+                            val endTime = getCalendarFromDate(calendar.time).apply {
+                                add(Calendar.MINUTE, -(60 - sleepSplit))
+                            }.timeInMillis
+                            details.add(
+                                SleepDetails(
+                                    startIndex = startIndex,
+                                    endIndex = endIndex,
+                                    startTime = startTime,
+                                    endTime = endTime - 1
+                                )
+                            )
+                            sleepSplit = 60
+                        } else {
+                            if (sleepStatus == SleepType.NONE) {
+                                sleepSplit--
+                                if (sleepSplit == 0) {
+                                    val endIndex = splitIndex - 60
+                                    val endTime = getCalendarFromDate(calendar.time).apply {
+                                        add(Calendar.MINUTE, -60)
+                                    }.timeInMillis
+                                    details.add(
+                                        SleepDetails(
+                                            startIndex = startIndex,
+                                            endIndex = endIndex,
+                                            startTime = startTime,
+                                            endTime = endTime
+                                        )
+                                    )
+                                    startIndex = -1
+                                    startTime = -1
+                                    sleepSplit = 60
+                                }
+                            } else {
+                                sleepSplit = 60
+                            }
+                        }
+                        if (duration == 0) {
+                            sleepStatus = SleepType.NONE
+                        } else {
+                            duration--
+                        }
+                        combo[index++] = Pair(calendar.timeInMillis, sleepStatus)
+                        calendar.add(Calendar.MINUTE, 1)
+                        splitIndex++
+                    }
+                    val sleepDebt = sleep.target - sleep.getTotalSleep()
+                    val listOfProducts: ArrayList<WearableProduct> = arrayListOf()
+                    WearableProduct.getProduct(sleep.product)?.let {
+                        listOfProducts.add(it)
+                    }
+                    data.setDayDataCombo(
+                        listOfProducts,
+                        sleep.product,
+                        combo,
+                        sleep.getTotalSleep(),
+                        if (sleep.getTotalSleep() == 0) 0 else sleep.target,
+                        if (sleepDebt > 0) sleepDebt else 0,
+                        details,
+                        splitIndex
+                    )
+                    data.setTotals(
+                        sleep.deep,
+                        sleep.light,
+                        sleep.awake,
+                        sleep.ttfs,
+                        sleep.rem,
+                        sleep.score,
+                        sleep.nap
+                    )
+                } else {
+                    data.isChanged = true
+                    data.totalTarget = if ((lastSleep?.target ?: 0) > 0) lastSleep?.target
+                        ?: todaySleepGoal else todaySleepGoal
+                    data.totalDisplayTarget = data.totalTarget
+                }
+            } else {
+                data.isChanged = true
+                data.totalTarget = if ((lastSleep?.target ?: 0) > 0) lastSleep?.target
+                    ?: todaySleepGoal else todaySleepGoal
+                data.totalDisplayTarget = data.totalTarget
+            }
+            mainDispatcher.launch {
+                update(data)
+            }
+        }
+    }
+
+    fun isCustomWeekDay(): Boolean {
+        return (weekDate.get(Calendar.DAY_OF_WEEK) != Calendar.MONDAY)
+    }
+
+    fun weekDay(): Int {
+        return when (weekDate.get(Calendar.DAY_OF_WEEK)) {
+            Calendar.MONDAY -> 1
+            Calendar.TUESDAY -> 2
+            Calendar.WEDNESDAY -> 3
+            Calendar.THURSDAY -> 4
+            Calendar.FRIDAY -> 5
+            Calendar.SATURDAY -> 6
+            Calendar.SUNDAY -> 7
+            else -> 1
+        }
+    }
+
+    fun getScopeDate(): Date {
+        return when (currentScope) {
+            SummaryScope.DAY -> dayDate.time
+            SummaryScope.WEEK -> weekDate.time
+            SummaryScope.MONTH -> monthDate.time
+        }
+    }
+
+    private fun Long.getSleepStartBufferValues(sleepStart: Date): Pair<Calendar, Int> {
+        val date = Date(this)
+        var startIndex: Int
+        var startCalendar = getLocalCalendar()
+        if (date.getCurrentMinute() % 60 < 15 && date.getCurrentMinute() < 60) {
+            /*If Sleep Start around 12 to 12:15.*/
+            startCalendar = getLocalCalendar().apply { time = sleepStart }
+            startCalendar.add(Calendar.MINUTE, -60)
+            startIndex = -60
+        } else if (date.getCurrentMinute() % 60 < 15) {
+            /*If Sleep Start hour less than 15 min, adding one hour buffer*/
+            startCalendar.apply {
+                timeInMillis = this@getSleepStartBufferValues
+            }
+            startCalendar.set(Calendar.MINUTE, 0)
+            startCalendar.add(Calendar.MINUTE, -60)
+            startIndex = startCalendar.getCurrentMinute()
+        } else {
+            /*For other time sets sleep starts at sleep starting hour by resetting min to zero*/
+            startCalendar.apply {
+                timeInMillis = this@getSleepStartBufferValues
+            }
+            startCalendar.set(Calendar.MINUTE, 0)
+            startIndex = startCalendar.getCurrentMinute()
+        }
+        startIndex -= if (date.isSameDay(sleepStart)) {
+            0
+        } else {
+            1440
+        }
+        return Pair(startCalendar, startIndex)
+    }
+
+    private fun Long.getSleepEndBufferValue(startDate: Date): Int {
+        val date = Date(this)
+        val startIndex: Int
+        val extraBufferIndex: Int
+        val startCalendar = getLocalCalendar()
+        if (date.getCurrentMinute() % 60 > 45 && date.getCurrentMinute() > 1380) {
+            /*If Sleep Ends at 11:45 to 11:59 adding one hour buffer to next day. For Same day sleep.*/
+            startIndex = 1440 + 60
+        } else if (date.getCurrentMinute() % 60 > 45) {
+            /*If Sleep Ending hour less than 15min then adding 1 hour before*/
+            startCalendar.apply {
+                timeInMillis = this@getSleepEndBufferValue
+            }
+            startCalendar.add(Calendar.HOUR_OF_DAY, 2)
+            startCalendar.set(Calendar.MINUTE, 0)
+            extraBufferIndex = if (TimeUnit.MILLISECONDS.toDays(
+                    startCalendar.time.atStartOfDay().toMilliSeconds() - startDate.atStartOfDay()
+                        .toMilliSeconds()
+                ) > 1
+            ) 1440 else 0
+            startIndex = startCalendar.getCurrentMinute() + extraBufferIndex
+        } else {
+            /*For other time slots end time will be setting to last min in the current hour*/
+            startCalendar.apply {
+                timeInMillis = this@getSleepEndBufferValue
+            }
+            startCalendar.add(Calendar.HOUR_OF_DAY, 1)
+            startCalendar.set(Calendar.MINUTE, 0)
+            extraBufferIndex = if (TimeUnit.MILLISECONDS.toDays(
+                    startCalendar.time.atStartOfDay().toMilliSeconds() - startDate.atStartOfDay()
+                        .toMilliSeconds()
+                ) > 1
+            ) 1440 else 0
+            startIndex = startCalendar.getCurrentMinute() + extraBufferIndex
+        }
+        return startIndex
+    }
+}
+
+data class SleepGraphModel(
+    val date: Date,
+    val scope: SummaryScope
+) {
+    var isUpdate = false
+    var isLoading = false
+    var isChanged = true
+    var code: String = ""
+    var products: List<WearableProduct> = arrayListOf()
+    var totalSleep: Int = 0
+    var totalDeepSleep: Int = 0
+    var totalLightSleep: Int = 0
+    var totalAwakeSleep: Int = 0
+    var totalTimeToFallSleep: Int = 0
+    var totalRemSleep: Int = 0
+    var totalNapSleep: Int = 0
+    var totalTarget: Int = 0
+    var totalDisplayTarget: Int = 0
+    var totalDebt: Int = 0
+    var score: Int = 0
+    val combo = LinkedHashMap<Int, SleepModel>()
+    val dayCombo = LinkedHashMap<Int, Pair<Long, SleepType>>()
+    val dayDetails = ArrayList<SleepDetails>()
+    var detailsTotal = 0
+    var goalStatus = false
+
+    fun setDataCombo(
+        products: List<WearableProduct>,
+        items: LinkedHashMap<Int, SleepModel>,
+        totalSleep: Int,
+        totalTarget: Int,
+        totalDisplayTarget: Int,
+        totalDebt: Int
+    ) {
+        this.products = products
+        items.forEach {
+            val value = combo[it.key]
+            if (value == null) {
+                isChanged = true
+            } else {
+                if (value.awakeSleep != it.value.awakeSleep ||
+                    value.timeToFallSleep != it.value.timeToFallSleep ||
+                    value.deepSleep != it.value.deepSleep ||
+                    value.lightSleep != it.value.lightSleep ||
+                    value.remSleep != it.value.remSleep ||
+                    value.target != it.value.target
+                ) {
+                    isChanged = true
+                }
+            }
+        }
+        if (this.totalSleep != totalSleep ||
+            this.totalTarget != totalTarget ||
+            this.totalDisplayTarget != totalDisplayTarget ||
+            this.totalDebt != totalDebt
+        ) {
+            isChanged = true
+        }
+        combo.clear()
+        combo.putAll(items)
+        this.totalSleep = totalSleep
+        this.totalTarget = totalTarget
+        this.totalDisplayTarget = totalDisplayTarget
+        this.totalDebt = totalDebt
+        this.goalStatus = this.totalSleep >= this.totalTarget
+    }
+
+    fun setDayDataCombo(
+        products: List<WearableProduct>,
+        code: String,
+        items: LinkedHashMap<Int, Pair<Long, SleepType>>,
+        totalSleep: Int,
+        totalTarget: Int,
+        totalDebt: Int,
+        details: ArrayList<SleepDetails>,
+        detailsTotal: Int
+    ) {
+        this.code = code
+        this.products=products
+        items.forEach {
+            val value = dayCombo[it.key]
+            if (value == null) {
+                isChanged = true
+            } else {
+                if (value.first != it.value.first ||
+                    value.second != it.value.second
+                ) {
+                    isChanged = true
+                }
+            }
+        }
+        if (this.totalSleep != totalSleep || this.totalTarget != totalTarget ||
+            this.totalDebt != totalDebt || this.detailsTotal != detailsTotal
+        ) {
+            isChanged = true
+        }
+        dayCombo.clear()
+        dayCombo.putAll(items)
+        dayDetails.clear()
+        dayDetails.addAll(details)
+        this.totalSleep = totalSleep
+        this.totalTarget = totalTarget
+        this.totalDisplayTarget = totalTarget
+        this.totalDebt = totalDebt
+        this.detailsTotal = detailsTotal
+        this.goalStatus = this.totalSleep >= this.totalTarget
+    }
+
+    fun setTotals(
+        totalDeepSleep: Int,
+        totalLightSleep: Int,
+        totalAwakeSleep: Int,
+        totalTimeToFallSleep: Int,
+        totalRemSleep: Int,
+        score: Int,
+        totalNapSleep: Int
+    ) {
+        if (this.totalDeepSleep != totalDeepSleep || this.totalLightSleep != totalLightSleep ||
+            this.totalAwakeSleep != totalAwakeSleep || this.totalRemSleep != totalRemSleep ||
+            this.score != score || this.totalNapSleep != totalNapSleep || this.totalTimeToFallSleep != totalTimeToFallSleep
+
+        ) {
+            isChanged = true
+        }
+        this.totalDeepSleep = totalDeepSleep
+        this.totalLightSleep = totalLightSleep
+        this.totalAwakeSleep = totalAwakeSleep
+        this.totalTimeToFallSleep = totalTimeToFallSleep
+        this.totalRemSleep = totalRemSleep
+        this.score = score
+        this.totalNapSleep = totalNapSleep
+    }
+
+    fun isGraphEmpty(): Boolean {
+        return totalSleep <= 0
+    }
+}
+
+@Suppress("unused")
+val sleepFormatter = object : ValueFormatter() {
+    override fun getAxisLabel(value: Float, axis: AxisBase?): String {
+        return "${(value / 60).toInt()}"
+    }
+}
+
+data class SleepModel(
+    val deepSleep: Int,
+    val lightSleep: Int,
+    val awakeSleep: Int,
+    val timeToFallSleep: Int,
+    val remSleep: Int,
+    val napSleep: Int,
+    val target: Int
+)
+
+data class SleepDetails(
+    val startIndex: Int,
+    val endIndex: Int,
+    val startTime: Long,
+    val endTime: Long
+)
