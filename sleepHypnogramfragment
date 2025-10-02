@@ -1,0 +1,2189 @@
+package fastrack.reflex.fragment
+
+import android.annotation.SuppressLint
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.drawable.BitmapDrawable
+import android.os.Bundle
+import android.text.Spannable
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.TextUtils
+import android.text.style.RelativeSizeSpan
+import android.util.Log
+import android.util.TypedValue
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.SeekBar
+import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import androidx.core.content.res.ResourcesCompat
+import androidx.core.view.isVisible
+import androidx.fragment.app.viewModels
+import androidx.lifecycle.Observer
+import androidx.recyclerview.widget.LinearLayoutManager
+import com.github.mikephil.charting.charts.CombinedChart
+import com.github.mikephil.charting.components.AxisBase
+import com.github.mikephil.charting.components.MarkerView
+import com.github.mikephil.charting.components.XAxis
+import com.github.mikephil.charting.components.YAxis
+import com.github.mikephil.charting.data.BarData
+import com.github.mikephil.charting.data.BarDataSet
+import com.github.mikephil.charting.data.BarEntry
+import com.github.mikephil.charting.data.CombinedData
+import com.github.mikephil.charting.data.Entry
+import com.github.mikephil.charting.data.LineData
+import com.github.mikephil.charting.data.LineDataSet
+import com.github.mikephil.charting.formatter.StackedValueFormatter
+import com.github.mikephil.charting.formatter.ValueFormatter
+import com.github.mikephil.charting.highlight.Highlight
+import com.github.mikephil.charting.interfaces.datasets.ILineDataSet
+import com.github.mikephil.charting.listener.OnChartValueSelectedListener
+import com.github.mikephil.charting.utils.MPPointF
+import com.google.firebase.analytics.FirebaseAnalytics
+import com.skydoves.balloon.showAlignTop
+import com.titan.logger.duration
+import fastrack.reflex.R
+import fastrack.reflex.SleepMetricItem
+import fastrack.reflex.TimeRange
+import fastrack.reflex.activity.CalendarActivity
+import fastrack.reflex.activity.CalendarEventType
+import fastrack.reflex.adapter.SleepMetricsAdapter
+import fastrack.reflex.alert.GenericBottomDialog
+import fastrack.reflex.alert.SleepScoreInfoDialog
+import fastrack.reflex.alert.SleepSettingsAlert
+import fastrack.reflex.applyHorizontalDragBlocker
+import fastrack.reflex.base.BaseFragment
+import fastrack.reflex.canGoBackward
+import fastrack.reflex.canGoForward
+import fastrack.reflex.databinding.FragmentSleepHypnogramBinding
+import fastrack.reflex.databinding.LayoutSeekbarThumbSleepBinding
+import fastrack.reflex.formatTime
+import fastrack.reflex.getColorFromAttr
+import fastrack.reflex.getSerializableExtraWithBVC
+import fastrack.reflex.onInitialized
+import fastrack.reflex.preference.SharedPreference
+import fastrack.reflex.processDate
+import fastrack.reflex.processDateOnly
+import fastrack.reflex.processMonthDate
+import fastrack.reflex.processWeekDateRange
+import fastrack.reflex.setOnReflexClickListener
+import fastrack.reflex.tutorials.TutorialListener
+import fastrack.reflex.tutorials.TutorialManager
+import fastrack.reflex.utils.CustomTypefaceSpan
+import fastrack.reflex.utils.endTime
+import fastrack.reflex.viewmodel.HeartRateGraphModel
+import fastrack.reflex.viewmodel.SleepGraphModel
+import fastrack.reflex.viewmodel.SleepModel
+import fastrack.reflex.viewmodel.SleepViewModel
+import fastrack.reflex.widget.SummaryScope
+import fastrack.reflex.widget.SummaryScopeListener
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import titan.commons.WearableProduct
+import titan.commons.atStartOfDay
+import titan.commons.controller.wearable.isHrvInSleepSupported
+import titan.commons.controller.wearable.isNapSleepSupportedProducts
+import titan.commons.controller.wearable.isRespiratoryRateSupportedProducts
+import titan.commons.controller.wearable.isTimeToFallSleepSupportedProducts
+import titan.commons.controller.wearable.wearablePaired
+import titan.commons.controller.wearable.withSelectedWearableProduct
+import titan.commons.d2_m3
+import titan.commons.getCalendarFromDate
+import titan.commons.getLocalCalendar
+import titan.commons.getPairedWearableProducts
+import java.util.Calendar
+import java.util.Date
+import kotlin.math.ceil
+import kotlin.math.roundToInt
+
+class SleepHypnogramFragment : BaseFragment<FragmentSleepHypnogramBinding>() {
+    private val viewModel: SleepViewModel by viewModels()
+
+    private var scope: SummaryScope = SummaryScope.DAY
+    private val mainDispatcher = CoroutineScope(Dispatchers.Main)
+    private var thumbView: View? = null
+    private var goalReachedPosition = -1
+    private var dayGoalReachedPosition = -1
+    private val dataMap = HashMap<Int, Long>()
+    private var dayCombo = LinkedHashMap<Int, Pair<Long, SleepType>>()
+    private var sleepScoreDialog: SleepScoreInfoDialog? = null
+    private var loadingDialog: GenericBottomDialog? = null
+    private val tutorialManager = TutorialManager.manager
+    private var inBetweenHrRange: Boolean = false
+    private var alertSettings: SleepSettingsAlert? = null
+    private var viewStateCallback: ViewStateCallback? = null
+    private var sleepStages: List<Int> = arrayListOf()
+    private var timeStamps: List<Float> = arrayListOf()
+    private var hrValues: List<Float> = arrayListOf()
+    private var selectedHrValue = -1
+    private var currentHrProgress: Int = -1
+    private var sleepSummaryMap = LinkedHashMap<Int, SleepModel>()
+    private var currentBaseDate: Date? = null
+    private var sleepKeys: List<Int> = emptyList()
+    private var hrDataSets = mutableListOf<ILineDataSet>()
+    private var dataSetsGlobal = mutableListOf<ILineDataSet>()
+    private var sleepStageTimestamps = mutableListOf<Long>()
+    private var weekView : Boolean = false
+    var lastSelectedEntry: Entry? = null
+    var lastHighlight: Highlight? = null
+    private var isRecordExist : Boolean = false
+
+
+    @SuppressLint("InflateParams")
+    override fun onCreateView(
+        inflater: LayoutInflater, container: ViewGroup?,
+        savedInstanceState: Bundle?
+    ): View {
+        binding = FragmentSleepHypnogramBinding.inflate(inflater, container, false)
+        thumbView =
+            LayoutInflater.from(context).inflate(R.layout.layout_seekbar_thumb, null, false)
+        observeClick(binding.root)
+        val analytics = context?.let { FirebaseAnalytics.getInstance(it) }
+        analytics?.logEvent("sleep", null)
+        return binding.root
+    }
+
+    override fun resume() {
+        tutorialManager.startSleepTutorial()
+        updateCarouselArrows()
+        startTime = Date().time
+    }
+
+    override fun pause() {
+        scopeChangeEvent()
+    }
+
+    override fun destroyView() {
+        tutorialManager.remove(listener = tutorialListener)
+        viewModel.graphDetails().removeObserver(dataObserver)
+        viewModel.showProgress().removeObserver(progressObserver)
+        viewModel.averageRR().removeObserver(rrObserver)
+        viewModel.averageHrv().removeObserver(hrvObserver)
+        alertSettings?.dismiss()
+        alertSettings = null
+    }
+
+    private val tutorialListener = object : TutorialListener {
+        override fun invoke(tutorial: String) {
+            when (tutorial) {
+                "sleep_score_info" -> {
+                    if (binding.sleepScoreInfoDay.isVisible) {
+                        val sleepBalloon = context?.let {
+                            tutorialManager.sleepBalloon(
+                                it,
+                                0f
+                            )
+                        }
+                        sleepBalloon?.let { binding.sleepScoreInfoDay.showAlignTop(it) }
+                    }
+                }
+            }
+        }
+
+        override fun done() {
+        }
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    override fun init() {
+        tutorialManager.add(listener = tutorialListener)
+        updateScopeData(SummaryScope.DAY)
+        viewModel.currentScope = SummaryScope.DAY
+
+        binding.root.onInitialized {
+            binding.chart.post {
+                binding.chart.setViewPortOffsets(
+                    (binding.root.width * 0.15f),
+                    20f,
+                    (binding.root.width * 0.08f),
+                    60f
+                )
+                viewModel.setDate(Date())
+            }
+        }
+        viewModel.showProgress().observe(this, progressObserver)
+        binding.spindleSeekBar.setOnSeekBarChangeListener(spindleSeekBarListener)
+        binding.highLightSeekBar.setOnTouchListener { _, _ -> true }
+        binding.Cbheartrategraph.setOnCheckedChangeListener { _, isChecked ->
+            toggleHeartRateGraph(isChecked)
+        }
+
+        viewModel.graphDetails().observe(this, dataObserver)
+        viewModel.averageHrv().observe(this, hrvObserver)
+        viewModel.averageRR().observe(this, rrObserver)
+        binding.chart.apply {
+            setDrawBorders(false)
+
+            xAxis.apply {
+                position = XAxis.XAxisPosition.BOTTOM
+                setDrawAxisLine(true)
+                axisLineColor = Color.LTGRAY
+                axisLineWidth = 0.5f
+                setDrawLabels(true)
+            }
+
+            axisRight.isEnabled = false
+            description.isEnabled = false
+            isDragEnabled = true
+            setTouchEnabled(true)
+            setDrawGridBackground(false)
+            setScaleEnabled(false)
+            setPinchZoom(false)
+            isAutoScaleMinMaxEnabled = true
+            legend.isEnabled = false
+            axisLeft.typeface = ResourcesCompat.getFont(context, R.font.poppins_medium)
+            axisLeft.textColor =
+                getColorFromAttr(context, com.google.android.material.R.attr.colorOnSecondary)
+            axisLeft.textSize = 12f
+            axisLeft.setPosition(YAxis.YAxisLabelPosition.OUTSIDE_CHART)
+            axisLeft.setDrawGridLines(false)
+            axisLeft.axisLineColor = Color.TRANSPARENT
+            xAxis.setDrawLabels(false)
+            xAxis.setDrawGridLines(false)
+            axisRight.isEnabled = false
+            setNoDataText(combinedChart = this, isLoading = true)
+        }
+
+        binding.chartToday.apply {
+            setNoDataText(combinedChart = this, isLoading = true)
+        }
+        binding.backButton.setOnReflexClickListener {
+            SharedPreference.sleepRecordMap = emptyMap()
+            onBackPressed()
+        }
+        binding.previousIcon.setOnReflexClickListener {
+            setNoDataText(binding.chart, isLoading = true)
+            setNoDataText(binding.chartToday, isLoading = true)
+            viewModel.previous()
+            updateCarouselArrows()
+        }
+        binding.nextIcon.setOnReflexClickListener {
+            setNoDataText(binding.chart, isLoading = true)
+            setNoDataText(binding.chartToday, isLoading = true)
+            viewModel.next()
+            updateCarouselArrows()
+        }
+        binding.calendar.setOnReflexClickListener {
+            binding.scrollView.scrollTo(0, 0)
+            val intent = Intent(this.activity, CalendarActivity::class.java)
+            intent.putExtra("END_DATE", getLocalCalendar().time.atStartOfDay())
+            intent.putExtra(
+                "START_DATE",
+                getLocalCalendar().apply {
+                    timeInMillis = SharedPreference.accountCreatedOn
+                }.time.atStartOfDay()
+            )
+            intent.putExtra("EVENT_TYPE", CalendarEventType.SLEEP)
+            intent.putExtra("CALENDAR_VIEW_TYPE", viewModel.currentScope)
+            //startActivityForResult(intent, 1)
+            resultLauncher.launch(intent)
+        }
+        binding.summarySwitch.listener = scopeListener
+        binding.sleepScoreInfoWeekMonth.setOnReflexClickListener {
+            openSleepScoreInfoDialog()
+        }
+
+        binding.sleepScoreInfoDay.setOnReflexClickListener {
+            openSleepScoreInfoDialog()
+        }
+    }
+
+    private fun setNoDataText(combinedChart: CombinedChart, isLoading: Boolean = false) {
+        Log.d("SleepHypnogramFragment", "setNoDataText:isLoading $isLoading ")
+        binding.rippleBackground.visibility = View.GONE
+        context?.let {
+            combinedChart.setNoDataText(it.getString(if(isLoading) R.string.please_wait else R.string.no_sleep_found))
+            combinedChart.setNoDataTextTypeface(ResourcesCompat.getFont(it, R.font.poppins_medium))
+            combinedChart.setNoDataTextColor(
+                getColorFromAttr(
+                    it,
+                    com.google.android.material.R.attr.colorOnSecondary
+                )
+            )
+        }
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+        binding.rippleBackgroundAnimation.startRippleAnimation()
+    }
+
+    private var resultLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode == Activity.RESULT_OK) {
+                val data: Intent? = result.data
+                if (data != null) {
+                    if (data.hasExtra("SELECTED_DATE")) {
+                        data.getSerializableExtraWithBVC("SELECTED_DATE", Date::class.java).let {
+                            it
+                        }?.let {
+                            setNoDataText(binding.chart, isLoading = true)
+                            setNoDataText(binding.chartToday, isLoading = true)
+                            viewModel.setDate(it)
+                        }
+                    } else if (data.hasExtra("END_DATE")) {
+                        data.getSerializableExtraWithBVC("END_DATE", Date::class.java).let {
+                            it
+                        }?.let {
+                            setNoDataText(binding.chart, isLoading = true)
+                            setNoDataText(binding.chartToday, isLoading = true)
+                            viewModel.setDate(it)
+                        }
+                    }
+                }
+            }
+        }
+
+    private val scopeListener = object : SummaryScopeListener {
+        override fun selected(scope: SummaryScope) {
+            if (scope == SummaryScope.DAY && viewModel.currentScope != scope && dayGoalReachedPosition < 0) {
+//                binding.dayGoalIcon.visibility = View.GONE
+                dayGoalReachedPosition = -1
+            }
+            setNoDataText(binding.chart, isLoading = true)
+            setNoDataText(binding.chartToday, isLoading = true)
+            scopeChangeEvent()
+            viewModel.selectedScope(scope)
+            updateCarouselArrows()
+        }
+    }
+
+    private val hrvObserver = Observer<Int?> {
+        binding.tvDurationhrv.heartRateVariabilityHypnogram(it ?: 0)
+    }
+
+    private val rrObserver = Observer<Int?> {
+        binding.tvDurationrr.respiratoryRateHypnogram(it ?: 0)
+    }
+
+    private fun updateScopeData(scope: SummaryScope) {
+        binding.tvTitleNap.napSleepScope(scope)
+        binding.tvTitlehrv.hrv(scope)
+        binding.tvTitlerr.respiratoryRate(scope)
+    }
+
+    @SuppressLint("SetTextI18n")
+    private val dataObserver = Observer<SleepGraphModel?> { data ->
+        try {
+        data?.let {
+            updateScopeData(data.scope)
+            val totalValidSleep = data.totalDeepSleep + data.totalRemSleep + data.totalLightSleep
+            val isActualSleep = isValidSleep(data)
+            val isNapExist = data.totalNapSleep > 0
+            if(isNapExist){
+                binding.avgNapCard.visibility = View.VISIBLE
+            }else{
+                binding.avgNapCard.visibility = View.GONE
+            }
+            if (data.totalSleep > 0 || data.dayDetails.size > 0) {
+                calculateSleepPercentages(data.totalLightSleep, data.totalDeepSleep, data.totalRemSleep, totalValidSleep)
+                binding.tvAvgSleepDuration.totalSleepDaily(data.totalSleep)
+                binding.tvAvgSleepDuration.visibility = View.VISIBLE
+                binding.tvTotalSleepNaps.visibility = View.VISIBLE
+                binding.tvTotalSleepNaps.dailyGoalDaily(data.totalDisplayTarget)
+                binding.sleepTimeRow.visibility = View.VISIBLE
+                binding.spindleSeekBar.visibility = View.VISIBLE
+                binding.sleepScoreTvDay.text = data.score.toString()
+                binding.tvSleepDuration.totalSleepDaily(data.totalSleep)
+                binding.tvSleepScoreWeekMonth.text = data.score.toString()
+                binding.deepSleepValueWeekMonth.specificSleepDuration(isActualSleep, data.totalDeepSleep)
+                binding.tvDeepSleepDay.specificSleepDuration(isActualSleep, data.totalDeepSleep)
+                binding.lightSleepValueWeekMonth.specificSleepDuration(isActualSleep, data.totalLightSleep)
+                binding.tvLightSleepDay.specificSleepDuration(isActualSleep, data.totalLightSleep)
+                binding.awakeSleepValueWeekMonth.specificSleepDuration(isActualSleep, data.totalAwakeSleep, showDashIfZero = true)
+                binding.tvAwakeSleepDay.specificSleepDuration(isActualSleep, data.totalAwakeSleep, showDashIfZero = true)
+                binding.remSleepValueWeekMonth.specificSleepDuration(isActualSleep, data.totalRemSleep)
+                binding.tvNapDuration.specificSleepDuration(data.totalNapSleep > 0, data.totalNapSleep)
+                binding.tvRemSleepDay.specificSleepDuration(isActualSleep, data.totalRemSleep)
+                binding.typeTextView.visibility = View.VISIBLE
+                binding.sleepBreakdownContainerWeekMonth.visibility = View.VISIBLE
+            } else {
+                binding.tvTotalSleepNaps.visibility = View.GONE
+                binding.tvAvgSleepDuration.visibility = View.INVISIBLE
+                binding.spindleSeekBar.visibility = View.GONE
+                binding.tvSleepDuration.text = ""
+                binding.tvSleepScoreWeekMonth.text = "--"
+                binding.sleepTimeRow.visibility = View.GONE
+                binding.typeTextView.visibility = View.INVISIBLE
+                binding.sleepBreakdownContainerWeekMonth.visibility = View.GONE
+                binding.sleepScoreTvDay.text = "--"
+                binding.tvNapDuration.text = "--"
+                binding.deepSleepValueWeekMonth.specificSleepDuration(isActualSleep ,-1)
+                binding.tvDeepSleepDay.text = "--"
+                binding.lightSleepValueWeekMonth.specificSleepDuration(isActualSleep, -1)
+                binding.tvLightSleepDay.text = "--"
+                binding.awakeSleepValueWeekMonth.specificSleepDuration(isActualSleep, -1, showDashIfZero = true)
+                binding.tvAwakeSleepDay.text = "--"
+                binding.remSleepValueWeekMonth.specificSleepDuration(isActualSleep, -1)
+                binding.tvRemSleepDay.text = "--"
+                binding.tvDurationhrv.text = "--"
+                binding.tvDurationrr.text = "--"
+            }
+
+            val remSupported = canDisplayRemSleepLayout(data.products , data.totalRemSleep)
+            val napSupported = canDisplayNapSleepLayout(data.products , data.totalNapSleep)
+            val awakeSupported = canDisplayAwakeSleepLayout(data.products , data.totalAwakeSleep)
+            val ttfSupported = canDisplayTimeToFallSleepLayout(data.products)
+            val hrvSupported = canDisplayHrvInSleep(data.products)
+            val respiratoryRateSupported = canDisplayRespiratoryRate(data.products)
+
+            binding.remSleepValueWeekMonth.isVisible = remSupported
+            binding.awakeSleepIcon.visibility = if (awakeSupported) View.VISIBLE else View.GONE
+            binding.awakeSleepLayout.visibility = if (awakeSupported) View.VISIBLE else View.GONE
+            binding.AwakeSleepLayoutWeekMonth.visibility = if (awakeSupported) View.VISIBLE else View.GONE
+            binding.awakeSleepIconWeekMonth.visibility = if (awakeSupported) View.VISIBLE else View.GONE
+            binding.remSleepLayout.visibility = if (remSupported) View.VISIBLE else View.GONE
+            binding.remSleepLayoutWeekMonth.visibility = if (remSupported) View.VISIBLE else View.GONE
+            binding.remSleepIconWeekMonth.visibility = if (remSupported) View.VISIBLE else View.GONE
+            binding.remSleepIcon.visibility = if (remSupported) View.VISIBLE else View.GONE
+            binding.hrvCard.visibility = if (hrvSupported) View.VISIBLE else View.GONE
+            binding.rrCard.visibility = if (respiratoryRateSupported) View.VISIBLE else View.GONE
+            dataMap.clear()
+            goalReachedPosition = -1
+            dayGoalReachedPosition = -1
+            when (data.scope) {
+                SummaryScope.DAY -> {
+                    enableDatViewItem()
+                    setUpDayHypnogram(data)
+                    binding.dateText.text = processDate(data.date)
+                }
+
+                SummaryScope.WEEK -> {
+                    enableWeekAndMonthViewItem()
+                    setUpWeekGraph(data)
+                    binding.dateText.text = processWeekDateRange(data.date)
+                }
+
+                SummaryScope.MONTH -> {
+                    enableWeekAndMonthViewItem()
+                    setUpMonthDayGraph(data)
+                    binding.dateText.text = processMonthDate(data.date)
+                }
+            }
+            scope = data.scope
+        }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            Log.e("SleepHypnogram", "Error inside dataObserver", e)
+        }
+    }
+
+    private fun isValidSleep(data: SleepGraphModel) : Boolean{
+        return (data.totalDeepSleep > 0 || data.totalLightSleep > 0 || data.totalRemSleep > 0)
+    }
+
+    private fun enableWeekAndMonthViewItem() {
+        binding.chart.axisLeft.setDrawLabels(true)
+        binding.typeTextView.text = getString(R.string.sleep_y_axis)
+        binding.sleephypnogram.visibility = View.GONE
+        binding.weekMonthView.visibility = View.VISIBLE
+        binding.cardSleepMetrics.visibility = View.GONE
+    }
+
+    private fun enableDatViewItem() {
+        binding.sleephypnogram.visibility = View.VISIBLE
+        binding.weekMonthView.visibility = View.GONE
+        binding.avgNapCard.visibility = View.GONE
+        binding.cardSleepMetrics.visibility = View.VISIBLE
+        binding.chartToday.axisLeft.setDrawLabels(false)
+        binding.chartToday.axisRight.setDrawLabels(false)
+        binding.chartToday.xAxis.setDrawLabels(false)
+    }
+
+    // Calculates the percentage of specificSleep out of totalSleep, rounding to the nearest integer.
+    // Returns the result as a string in the format "(xx%)", or "(0%)" if totalSleep is zero.
+    private fun calculateSleepPercentages(lightSleep: Int, deepSleep: Int, remSleep: Int, totalSleep: Int) {
+        if (totalSleep == 0) {
+            binding.apply {
+                lightSleepPercentage.visibility = View.INVISIBLE
+                deepSleepPercentage.visibility = View.INVISIBLE
+                remSleepPercentage.visibility = View.INVISIBLE
+                awakeSleepPercentage.visibility = View.INVISIBLE
+            }
+            return
+        }else {
+
+            // Calculate percentages keeping decimal precision
+            val lightPct = lightSleep * 100.0 / totalSleep
+            val deepPct = deepSleep * 100.0 / totalSleep
+            val remPct = remSleep * 100.0 / totalSleep
+
+            // Round while tracking remaining difference
+            var lightRounded = lightPct.roundToInt()
+            var deepRounded = deepPct.roundToInt()
+            var remRounded = remPct.roundToInt()
+
+            val sum = lightRounded + deepRounded + remRounded
+            val remaining = 100 - sum
+
+            // Distribute remaining difference (usually just ±1)
+            if (remaining != 0) {
+                // Find which value has largest decimal portion
+                val decimals = listOf(
+                    lightPct - lightRounded,
+                    deepPct - deepRounded,
+                    remPct - remRounded
+                )
+                val indexToAdjust = decimals.indexOf(decimals.maxOrNull())
+
+                when (indexToAdjust) {
+                    0 -> lightRounded += remaining
+                    1 -> deepRounded += remaining
+                    2 -> remRounded += remaining
+                }
+            }
+
+            // Format text with space if less than 10
+            val lightText = if (lightRounded < 10) "(  $lightRounded%)" else "($lightRounded%)"
+            val deepText = if (deepRounded < 10) "(  $deepRounded%)" else "($deepRounded%)"
+            val remText = if (remRounded < 10) "(  $remRounded%)" else "($remRounded%)"
+
+            binding.apply {
+                lightSleepPercentage.visibility = View.VISIBLE
+                deepSleepPercentage.visibility = View.VISIBLE
+                remSleepPercentage.visibility = View.VISIBLE
+                awakeSleepPercentage.visibility = View.VISIBLE
+                lightSleepPercentage.text = lightText
+                deepSleepPercentage.text = deepText
+                remSleepPercentage.text = remText
+            }
+        }
+    }
+
+    private fun getDateFromKey(baseDate: Date, index: Int): Date {
+        return Calendar.getInstance().apply {
+            time = baseDate
+                add(Calendar.DAY_OF_MONTH, index)
+        }.time
+    }
+
+    private fun setUpMonthDayGraph(data: SleepGraphModel) {
+        Log.d("SleepHypnogramFragment", "setUpMonthDayGraph: ")
+        val maxDay = getCalendarFromDate(data.date).getActualMaximum(Calendar.DAY_OF_MONTH)
+
+        if (!data.isGraphEmpty()) {
+            binding.chart.applyHorizontalDragBlocker()
+            currentBaseDate = data.date
+            sleepSummaryMap.clear()
+            binding.chart.highlightValues(null) // clear old marker highlight
+            sleepKeys = emptyList()
+            val entries = ArrayList<BarEntry>()
+            val avgEntries = ArrayList<Entry>()
+            var max: Long = 60
+            weekView = false
+            val sortedKeys = data.combo.keys.sorted()
+            sleepKeys = sortedKeys
+
+            for ((key, model) in data.combo) {
+                val totalSleep = (model.deepSleep + model.lightSleep + model.awakeSleep +
+                        model.napSleep + model.remSleep).toLong()
+
+                if (max < totalSleep) {
+                    max = totalSleep
+                }
+
+                if (totalSleep >= 0) {
+                    entries.add(
+                        BarEntry(
+                            key.toFloat(), floatArrayOf(
+                                model.timeToFallSleep.toFloat(),
+                                model.deepSleep.toFloat(),
+                                model.lightSleep.toFloat(),
+                                model.remSleep.toFloat(),
+                                model.awakeSleep.toFloat(),
+                                model.napSleep.toFloat()
+                            )
+                        )
+                    )
+                }
+
+                sleepSummaryMap[key] = model
+                sleepKeys = sleepSummaryMap.keys.toList()
+            }
+
+            val avgSleep = data.totalSleep
+            for (i in 0..maxDay + 1) {
+                avgEntries.add(Entry(i.toFloat(), avgSleep.toFloat()))
+            }
+            createMarkerView()
+            preventMarkerViewDiselectionOnDoubleClick()
+            val maxInHours = max / 60.0
+            val roundedMax = ceil(maxInHours / 2).toInt() * 2 // Round up to nearest even number
+            val axisMax = roundedMax * 60f // In minutes
+            binding.chart.axisLeft.axisMaximum = axisMax
+            binding.chart.axisLeft.axisMinimum = 0f
+            binding.chart.axisLeft.valueFormatter = YAxisValueFormatter(roundedMax)
+            binding.chart.axisLeft.granularity = 120f // 2 hours
+            // Determine label count
+            val labelCount = roundedMax / 2 + 1
+            if (labelCount == 2) {
+                // Only 0 and 2 → force 3 labels: 0, 1, 2
+                binding.chart.axisLeft.setLabelCount(3, true)
+            } else {
+                binding.chart.axisLeft.setLabelCount(labelCount, true)
+            }
+            val barDataSet = BarDataSet(entries, "bar")
+            val lineDataSet = LineDataSet(avgEntries, "line")
+            barDataSet.apply {
+                context?.let {
+                    colors = arrayListOf(
+                        getColorFromAttr(it, R.attr.timeToFallSleepColor),
+                        getColorFromAttr(it, R.attr.deep_sleep_hypnogram),
+                        getColorFromAttr(it, R.attr.light_sleep_hypnogram),
+                        getColorFromAttr(it, R.attr.rem_sleep_hypnogram),
+                        getColorFromAttr(it, R.attr.awake_sleep_hypnogram),
+                        getColorFromAttr(it, R.attr.nap_sleep_hypnogram)
+                    )
+                }
+                stackLabels = arrayOf("awake", "time_to_fall", "deep", "light", "REM", "nap")
+                setDrawIcons(true)
+                iconsOffset = MPPointF(7f, -7f)
+            }
+            lineDataSet.apply {
+                context?.let { color = getColorFromAttr(it, R.attr.colorAccent) }
+                enableDashedLine(7f, 7f, 0f)
+                lineWidth = 1f
+                setDrawCircles(false)
+                setDrawCircleHole(false)
+                setDrawIcons(true)
+                iconsOffset = MPPointF(7f, -7f)
+            }
+
+            val barSet = BarData(barDataSet)
+            barSet.barWidth = 0.50f
+            barSet.setValueFormatter(StackedValueFormatter(false, "", 1))
+            val lineSet = LineData(lineDataSet)
+            lineDataSet.setDrawHorizontalHighlightIndicator(false)
+            lineDataSet.setDrawVerticalHighlightIndicator(false)
+            val combinedChart = CombinedData().apply {
+                setData(barSet)
+                setData(lineSet)
+            }
+            binding.chart.data = combinedChart
+            binding.chart.data.setDrawValues(false)
+
+            val lastIndexWithData = entries.indexOfLast { entry ->
+                val yVals = entry.yVals ?: floatArrayOf()
+                yVals.any { it > 0f }
+            }
+
+            if (lastIndexWithData >= 0) {
+                // Use a delayed post to ensure chart is fully rendered
+                binding.chart.postDelayed({
+                    try {
+                        val combinedData = binding.chart.data
+                        if (combinedData != null && combinedData.allData.isNotEmpty()) {
+
+                            val barDataIndex = combinedData.allData.indexOfFirst { it is BarData }
+                            val barData = combinedData.allData.getOrNull(barDataIndex) as? BarData
+
+                            if (barData != null && barDataIndex != -1) {
+                                val barDataSet = barData.dataSets.firstOrNull()
+
+                                if (barDataSet != null && lastIndexWithData < barDataSet.entryCount) {
+                                    val lastEntry = entries[lastIndexWithData]
+
+                                    // Create highlight with stack index 0 (first stack)
+                                    val highlight = Highlight(
+                                        lastEntry.x,    // x value
+                                        0,          // dataSetIndex
+                                        5
+                                    )
+                                    highlight.dataIndex = 0
+                                    binding.chart.highlightValue(highlight)
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        println("${e.message}")
+                    }
+                }, 10)
+            }
+            binding.chart.invalidate()
+        } else {
+            binding.chart.data = null
+            Log.d("SleepHypnogramFragment", "setUpMonthDayGraph: no data")
+            setNoDataText(binding.chart, false)
+            binding.chart.invalidate()
+        }
+
+        setMonthXAxis(maxDay)
+    }
+
+    private fun preventMarkerViewDiselectionOnDoubleClick() {
+        binding.chart.setOnChartValueSelectedListener(object : OnChartValueSelectedListener {
+            override fun onValueSelected(e: Entry?, h: Highlight?) {
+                lastSelectedEntry = e
+                lastHighlight = h
+            }
+
+            override fun onNothingSelected() {
+                if (lastSelectedEntry != null && lastHighlight != null) {
+                    binding.chart.highlightValue(lastHighlight)
+                }
+            }
+        })
+    }
+
+    private fun setUpWeekGraph(data: SleepGraphModel) {
+        Log.d("SleepHypnogramFragment", "setUpWeekGraph: ")
+        if (!data.isGraphEmpty()) {
+            binding.chart.applyHorizontalDragBlocker()
+            currentBaseDate = data.date
+            sleepSummaryMap.clear()
+            binding.chart.highlightValues(null)
+            sleepKeys = emptyList()
+            weekView = true
+            val entries = ArrayList<BarEntry>()
+            val avgEntries = ArrayList<Entry>()
+            var max: Long = 60
+            val sortedKeys = data.combo.keys.sorted()
+            sleepKeys = sortedKeys
+
+            for ((key, model) in data.combo) {
+                val totalSleep = (model.deepSleep + model.lightSleep + model.awakeSleep +
+                        model.napSleep + model.remSleep).toLong()
+
+                if (max < totalSleep) {
+                    max = totalSleep
+                }
+
+                if (totalSleep >= 0) {
+                    entries.add(
+                        BarEntry(
+                            key.toFloat(), floatArrayOf(
+                                model.timeToFallSleep.toFloat(),
+                                model.deepSleep.toFloat(),
+                                model.lightSleep.toFloat(),
+                                model.remSleep.toFloat(),
+                                model.awakeSleep.toFloat(),
+                                model.napSleep.toFloat()
+                            )
+                        )
+                    )
+                }
+                sleepSummaryMap[key] = model
+                sleepKeys = sleepSummaryMap.keys.toList()
+            }
+
+            val avgSleep = data.totalSleep
+            for (i in 0..8) {
+                avgEntries.add(Entry(i.toFloat(), avgSleep.toFloat()))
+            }
+            createMarkerView()
+            preventMarkerViewDiselectionOnDoubleClick()
+            val maxInHours = max / 60.0
+            val roundedMax = ceil(maxInHours / 2).toInt() * 2 // Round up to nearest even number
+            val axisMax = roundedMax * 60f // In minutes
+
+            binding.chart.axisLeft.axisMaximum = axisMax
+            binding.chart.axisLeft.axisMinimum = 0f
+            binding.chart.axisLeft.valueFormatter = YAxisValueFormatter(roundedMax)
+            binding.chart.axisLeft.granularity = 120f // 2 hours
+            binding.chart.axisLeft.granularity = 120f // 2 hours
+            // Determine label count
+            val labelCount = roundedMax / 2 + 1
+            if (labelCount == 2) {
+                // Only 0 and 2 → force 3 labels: 0, 1, 2
+                binding.chart.axisLeft.setLabelCount(3, true)
+            } else {
+                binding.chart.axisLeft.setLabelCount(labelCount, true)
+            }
+            val barDataSet = BarDataSet(entries, "bar")
+            val lineDataSet = LineDataSet(avgEntries, "line")
+            barDataSet.apply {
+                highLightAlpha = 0
+                isHighlightEnabled = true
+                context?.let {
+                    colors = arrayListOf(
+                        getColorFromAttr(it, R.attr.timeToFallSleepColor),
+                        getColorFromAttr(it, R.attr.deep_sleep_hypnogram),
+                        getColorFromAttr(it, R.attr.light_sleep_hypnogram),
+                        getColorFromAttr(it, R.attr.rem_sleep_hypnogram),
+                        getColorFromAttr(it, R.attr.awake_sleep_hypnogram),
+                        getColorFromAttr(it, R.attr.nap_sleep_hypnogram)
+                    )
+                }
+                stackLabels = arrayOf("awake", "time_to_fall", "deep", "light", "REM", "nap")
+                setDrawIcons(true)
+                iconsOffset = MPPointF(7f, -7f)
+            }
+            lineDataSet.apply {
+                context?.let { color = getColorFromAttr(it, R.attr.colorAccent) }
+                enableDashedLine(7f, 7f, 0f)
+                lineWidth = 1f
+                setDrawCircles(false)
+                setDrawCircleHole(false)
+                setDrawIcons(true)
+                iconsOffset = MPPointF(7f, -7f)
+            }
+            val barSet = BarData(barDataSet)
+            barSet.barWidth = 0.5f
+            barSet.setValueFormatter(StackedValueFormatter(false, "", 1))
+            val lineSet = LineData(lineDataSet)
+            lineDataSet.setDrawHorizontalHighlightIndicator(false)
+            lineDataSet.setDrawVerticalHighlightIndicator(false)
+            val combinedChart = CombinedData().apply {
+                setData(barSet)
+                setData(lineSet)
+            }
+            binding.chart.data = combinedChart
+            binding.chart.data.setDrawValues(false)
+            val lastIndexWithData = entries.indexOfLast { entry ->
+                val yVals = entry.yVals ?: floatArrayOf()
+                yVals.any { it > 0f }
+            }
+
+            if (lastIndexWithData >= 0) {
+                // Use a delayed post to ensure chart is fully rendered
+                binding.chart.postDelayed({
+                    try {
+                        val combinedData = binding.chart.data
+                        if (combinedData != null && combinedData.allData.isNotEmpty()) {
+
+                            val barDataIndex = combinedData.allData.indexOfFirst { it is BarData }
+                            val barData = combinedData.allData.getOrNull(barDataIndex) as? BarData
+
+                            if (barData != null && barDataIndex != -1) {
+                                val barDataSet = barData.dataSets.firstOrNull()
+
+                                if (barDataSet != null && lastIndexWithData < barDataSet.entryCount) {
+                                    val lastEntry = entries[lastIndexWithData]
+
+                                    // Create highlight with stack index 0 (first stack)
+                                    val highlight = Highlight(
+                                        lastEntry.x,    // x value
+                                        0,          // dataSetIndex
+                                        5
+                                    )
+                                    highlight.dataIndex = 0
+                                    binding.chart.highlightValue(highlight)
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        println("${e.message}")
+                    }
+                }, 10)
+            }
+            binding.chart.invalidate()
+        } else {
+            binding.chart.data = null
+            Log.d("SleepHypnogramFragment", "setUpWeekGraph: no data")
+            setNoDataText(binding.chart, false)
+            binding.chart.invalidate()
+        }
+        setWeekXAxis()
+    }
+
+    private fun createMarkerView () {
+        binding.chart.apply {
+            xAxis.removeAllLimitLines()
+            setTouchEnabled(true)
+            startTime = Date().time
+            marker = object : MarkerView(context, R.layout.layout_seekbar_thumb_sleep) {
+                private val markerBinding: LayoutSeekbarThumbSleepBinding =
+                    LayoutSeekbarThumbSleepBinding.bind(findViewById(R.id.root_container))
+
+                override fun refreshContent(e: Entry?, highlight: Highlight?) {
+                    e?.let {
+                        setHighlightPositionWeekMarker(
+                            e.x.roundToInt().minus(1),
+                            weekView,
+                            markerBinding
+                        )
+                        if (startTime > 0) {
+                            duration(startTime, "sleep_spindle_week", endTime(startTime))
+                        }
+                        startTime = Date().time
+                    }
+                    super.refreshContent(e, highlight)
+                }
+                override fun getOffset(): MPPointF {
+                    return MPPointF(-(width / 2).toFloat(), -binding.chart.height.toFloat() + 20f)
+                }
+
+                private val linePaint = Paint().apply {
+                    color = Color.parseColor("#40445f")
+                    strokeWidth = 3.5f
+                    isAntiAlias = true
+                }
+
+                private val circlePaint = Paint().apply {
+                    color = Color.parseColor("#284582")
+                    isAntiAlias = true
+                }
+
+                override fun draw(canvas: Canvas, posX: Float, posY: Float) {
+                    val saveId = canvas.save()
+                    val density = context.resources.displayMetrics.density
+                    measure(
+                        MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED),
+                        MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED)
+                    )
+                    layout(0, 0, measuredWidth, measuredHeight)
+                    val markerHeight = measuredHeight.toFloat()
+                    val contentTop = binding.chart.viewPortHandler.contentTop()
+                    val contentBottom = binding.chart.viewPortHandler.contentBottom()
+
+                    val adjustedPosY = if (posY - markerHeight < contentTop) {
+                        contentTop + markerHeight
+                    } else {
+                        posY
+                    }
+                    var lineStartY = adjustedPosY
+                    val lineEndY = contentBottom
+
+                    val minHeightPx = if (isRecordExist) {
+                        70 * density
+                    } else {
+                        155 * density
+                    }
+
+                    if (lineEndY - lineStartY < minHeightPx) {
+                        lineStartY = lineEndY - minHeightPx
+                    }
+
+                    val circleRadius = 5 * density
+                    canvas.drawLine(posX, lineStartY, posX, contentBottom + circleRadius, linePaint)
+                    canvas.drawCircle(posX, contentBottom + circleRadius, circleRadius, circlePaint)
+
+                    canvas.restoreToCount(saveId)
+                    super.draw(canvas, posX, adjustedPosY - markerHeight)
+                }
+            }
+        }
+    }
+    private fun setUpDayHypnogram(sleepGraphModel: SleepGraphModel) {
+        Log.d("SleepHypnogramFragment", "setUpDayHypnogram: ")
+        if (!sleepGraphModel.isGraphEmpty() && sleepGraphModel.dayCombo.isNotEmpty()) {
+            dayCombo = sleepGraphModel.dayCombo
+            val sortedEntries = sleepGraphModel.dayCombo.entries.sortedBy { it.value.first }
+
+            val sleepStages = mutableListOf<Int>()
+            val timeStamps = mutableListOf<Float>()
+            val sleepStageTimestamps = mutableListOf<Long>()
+            val sampleMetrics = mutableListOf<SleepMetricItem>()
+
+            val startTime = sortedEntries.first().value.first
+            val expectedIntervalMillis = 1 * 60 * 1000L // 1 min
+            val mergeThresholdMillis = 5 * 60 * 1000L // 5 min
+
+            var napStartTimestamp: Long? = null
+            var napEndTimestamp: Long?
+
+            sortedEntries.forEachIndexed { index, (_, pair) ->
+                val timestamp = pair.first
+                val sleepType = pair.second
+                val isLast = index == sortedEntries.lastIndex
+
+                // Normal stage processing
+                val stage = sleepTypeToStage[sleepType] ?: return@forEachIndexed
+                val minutesSinceStart = ((timestamp - startTime) / (1000 * 60)).toFloat()
+                val nextEntry = sortedEntries.getOrNull(index + 1)
+                val nextType = nextEntry?.value?.second
+
+                if (sleepType != SleepType.NAP) {
+                    sleepStages.add(stage)
+                    timeStamps.add(minutesSinceStart)
+                    if (nextType != sleepType && nextType == SleepType.NONE) {
+                        sleepStageTimestamps.add(timestamp + expectedIntervalMillis)
+                    } else {
+                        sleepStageTimestamps.add(timestamp)
+                    }
+                }
+                // Handles NAP stage: tracks start/end time, and when the last nap segment is reached,
+                // it records nap metrics (duration, time range) into the corresponding lists.
+                if (sleepType == SleepType.NAP) {
+                    if (napStartTimestamp == null) napStartTimestamp = timestamp
+                    napEndTimestamp = timestamp + expectedIntervalMillis
+
+                    val nextValid = sortedEntries.drop(index + 1)
+                        .firstOrNull { it.value.second != SleepType.NONE }
+
+                    val canMerge = nextValid?.value?.second == SleepType.NAP &&
+                            (nextValid.value.first - timestamp) <= mergeThresholdMillis
+
+                    val nextStageIsNotNap = nextValid?.value?.second != SleepType.NAP
+                    val shouldFinalize = isLast || nextStageIsNotNap || !canMerge
+
+                    if (shouldFinalize && napStartTimestamp != napEndTimestamp) {
+                        val safeNapStart = napStartTimestamp
+                        val safeNapEnd = napEndTimestamp
+                        if (safeNapStart != null && safeNapEnd != null) {
+                            var napTime = safeNapStart
+                            while (napTime <= safeNapEnd) {
+                                val minuteSinceStart = ((napTime - startTime) / (1000 * 60)).toFloat()
+                                sleepStages.add(4)
+                                timeStamps.add(minuteSinceStart)
+                                sleepStageTimestamps.add(napTime)
+                                napTime += 60 * 1000 // move to next minute
+                            }
+
+                            val value = ((safeNapEnd - safeNapStart) / (1000 * 60)).toInt()
+
+                            sampleMetrics.add(
+                                SleepMetricItem(
+                                    "Nap",
+                                    TimeRange(Date(safeNapStart), Date(safeNapEnd)),
+                                    value
+                                )
+                            )
+                        }
+
+                        // Reset nap trackers
+                        napStartTimestamp = null
+                        napEndTimestamp = null
+                    }
+                }
+            }
+
+            // Checks if there is any valid sleep stage other than Nap or gap,
+            // and if found, trims leading/trailing invalid stages from the lists.
+            val containSleepWithoutNap = sleepStages.any { it != 4 && it != -1 }
+
+            if (containSleepWithoutNap) { // Trim invalid sleep stages
+                trimInvalidSleepStages(sleepStages, sleepStageTimestamps, timeStamps)
+            }
+
+            this.sleepStageTimestamps = sleepStageTimestamps
+
+            if (sleepStageTimestamps.isNotEmpty()) {
+                val startFormatted = Date(sleepStageTimestamps.first()).formatTime()
+                val startDate = processDateOnly(Date(sleepStageTimestamps.first()))
+                val endFormatted = Date(sleepStageTimestamps.last()).formatTime()
+                binding.sleepStartTime.text = "${startDate},${startFormatted}"
+                binding.sleepEndTime.text = endFormatted
+
+            } else {
+                binding.sleepStartTime.text = "" // Or show "No data"
+                binding.sleepEndTime.text = ""
+            }
+
+            binding.spindleSeekBar.max = sleepStages.size - 1
+            binding.highLightSeekBar.max = sleepStages.size - 1
+            viewModel.getDayHeartRateData(sleepGraphModel, sleepStartTime = sleepStageTimestamps.first(), sleepEndTime = sleepStageTimestamps.last(), timeStamps.first().toInt(), timeStamps.last().toInt()
+            ) {
+                val hrModel: HeartRateGraphModel? = it
+                val hrValues = arrayListOf<Float>()
+                hrModel?.let { model ->
+                    timeStamps.forEach { timeStamp ->
+                        if (model.combo.containsKey(timeStamp.toInt())) {
+                            val value = model.combo[timeStamp.toInt()]
+                            value?.let {
+                                hrValues.add(value.toFloat())
+                            }
+                        }
+                    }
+                }
+
+                mainDispatcher.launch {
+                    if (sampleMetrics.isNotEmpty()) {
+                        binding.rvNapMetricsCard.visibility = View.VISIBLE
+                        binding.rvNapMetricsCard.layoutManager = LinearLayoutManager(context)
+                        binding.rvNapMetricsCard.adapter = SleepMetricsAdapter(sampleMetrics)
+                    } else {
+                        binding.rvNapMetricsCard.visibility = View.GONE
+                    }
+                    binding.sleepBreakdownContainerDay.visibility = View.VISIBLE
+                    binding.tvSleepInfo.visibility = View.VISIBLE
+                    binding.sleepSummaryNew.visibility = View.VISIBLE
+                    binding.highLightSeekBar.visibility = View.VISIBLE
+                    binding.sleepTimeRow.visibility = View.VISIBLE
+                    binding.spindleSeekBar.visibility = View.VISIBLE
+                    binding.bottomBar.visibility = View.VISIBLE
+                    if(hrValues.isEmpty()){
+                        binding.hrTextBox.visibility = View.INVISIBLE
+                    }else{
+                        binding.hrTextBox.visibility = View.VISIBLE
+                    }
+                    binding.rippleBackground.visibility = View.INVISIBLE
+                }
+                setupHypnogramChartLineFromModel(sleepStages, timeStamps, hrValues, requireContext())
+            }
+        } else {
+            mainDispatcher.launch {
+                binding.sleepBreakdownContainerDay.visibility = View.GONE
+                binding.tvSleepInfo.visibility = View.GONE
+                binding.spindleSeekBar.visibility = View.GONE
+                binding.rvNapMetricsCard.visibility = View.GONE
+                binding.sleepTimeRow.visibility = View.GONE
+                binding.bottomBar.visibility = View.INVISIBLE
+                binding.sleepSummaryNew.visibility = View.INVISIBLE
+                binding.highLightSeekBar.visibility = View.INVISIBLE
+                binding.rippleBackground.visibility = View.INVISIBLE
+                binding.chartToday.data = null
+                binding.chartToday.notifyDataSetChanged()
+                binding.chartToday.invalidate()
+                Log.d("SleepHypnogramFragment", "setUpDayHypnogram: no data")
+                setNoDataText(binding.chartToday, sleepGraphModel.isLoading)
+            }
+        }
+    }
+
+    private fun trimInvalidSleepStages(
+        stages: MutableList<Int>,
+        sleepStageTimestamps: MutableList<Long>,
+        timeStampsFloat: MutableList<Float>
+    ) {
+        // Trim from the start
+        while (stages.isNotEmpty() && stages.first() == -1) {
+            stages.removeAt(0)
+            sleepStageTimestamps.removeAt(0)
+            timeStampsFloat.removeAt(0)
+        }
+
+        // Trim from the end
+        while (stages.isNotEmpty() && stages.last() == -1) {
+            stages.removeAt(stages.size - 1)
+            sleepStageTimestamps.removeAt(sleepStageTimestamps.size - 1)
+            timeStampsFloat.removeAt(timeStampsFloat.size - 1)
+        }
+    }
+
+    private fun getSleepDuration(context: Context, start: Long, end: Long): CharSequence {
+        val value = ((end - start) / (1000 * 60)).toInt()
+        val hrMin = Pair(value / 60, value % 60)
+
+        val span1 = SpannableString("${hrMin.first}")
+        span1.setSpan(RelativeSizeSpan(1.2f), 0, span1.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+
+        val span2 = SpannableString(" hr ")
+        span2.setSpan(RelativeSizeSpan(0.9f), 0, span2.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        span2.setSpan(
+            CustomTypefaceSpan(ResourcesCompat.getFont(context, R.font.oswald_light)),
+            0, span2.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+
+        val span3 = SpannableString("${hrMin.second}")
+        span3.setSpan(RelativeSizeSpan(1.2f), 0, span3.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+
+        val span4 = SpannableString(" min")
+        span4.setSpan(RelativeSizeSpan(0.9f), 0, span4.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        span4.setSpan(
+            CustomTypefaceSpan(ResourcesCompat.getFont(context, R.font.oswald_light)),
+            0, span4.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+
+        return when {
+            hrMin.first == 0 -> TextUtils.concat(span3, span4)
+            hrMin.second == 0 -> TextUtils.concat(span1, span2)
+            else -> TextUtils.concat(span1, span2, span3, span4)
+        }
+    }
+
+        val sleepTypeToStage = mapOf(
+        SleepType.AWAKE to 0,
+        SleepType.REM_SLEEP to 1,
+        SleepType.LIGHT_SLEEP to 2,
+        SleepType.DEEP_SLEEP to 3,
+        SleepType.NAP to 4,
+        SleepType.NONE to -1,
+    )
+
+    // Segments the hypnogram into stage blocks, drawing filled rectangles for each stage (nap/other),
+    private fun setupHypnogramChartLineFromModel(
+        sleepStages: List<Int>,
+        timeStamps: List<Float>,
+        hrValues: List<Float>,
+        context: Context
+    ) {
+
+        this.sleepStages = sleepStages
+        this.timeStamps = timeStamps
+        this.hrValues = hrValues
+
+        val stageColors = listOf(
+            ContextCompat.getColor(context, R.color.awake_sleep_hypnogram),
+            ContextCompat.getColor(context, R.color.rem_sleep_hypnogram),
+            ContextCompat.getColor(context, R.color.light_sleep_hypnogram),
+            ContextCompat.getColor(context, R.color.deep_sleep_hypnogram),
+            ContextCompat.getColor(context, R.color.nap_sleep_hypnogram)
+        )
+
+
+        val dataSets = mutableListOf<ILineDataSet>()
+        val napStage = sleepTypeToStage[SleepType.NAP] ?: 4
+        val noSleep = sleepTypeToStage[SleepType.NONE] ?: -1
+
+        var startIndex = 0
+
+        for (i in 1 until sleepStages.size) {
+            val currentStage = sleepStages[i]
+            val previousStage = sleepStages[i - 1]
+
+            // When stage changes OR end of data
+            if (currentStage != previousStage || i == sleepStages.size - 1) {
+                val stageToDraw = sleepStages[startIndex]
+                if (stageToDraw == -1) {
+                    startIndex = i
+                    continue
+                }
+                val x1 = timeStamps[startIndex]
+                val x2 = timeStamps[i]
+
+                if (stageToDraw == napStage) {
+                    val leftX = x1
+                    val rightX = x2
+                    val topY = 3f  + 0.4f
+                    val bottomY = -0.5f
+
+                    val napBar = LineDataSet(
+                        listOf(
+                            Entry(leftX, bottomY),
+                            Entry(leftX, topY),
+                            Entry(rightX, topY),
+                            Entry(rightX, bottomY),
+                            Entry(leftX, bottomY)
+                        ),
+                        ""
+                    ).apply {
+                        color = stageColors[stageToDraw]
+                        setDrawFilled(true)
+                        setFillAlpha(255)
+                        fillColor = stageColors[stageToDraw]
+                        setDrawCircles(false)
+                        setDrawValues(false)
+                        setDrawHighlightIndicators(false)
+                        lineWidth = 0f
+                        mode = LineDataSet.Mode.LINEAR
+                    }
+                    dataSets.add(napBar)
+                } else {
+                    val topY = stageToDraw.toFloat() + 0.4f
+                    val bottomY = stageToDraw.toFloat() - 0.4f
+                    val entries = listOf(
+                        Entry(x1, bottomY),
+                        Entry(x1, topY),
+                        Entry(x2, topY),
+                        Entry(x2, bottomY),
+                        Entry(x1, bottomY)
+                    )
+                    // Build the dataset
+                    val horizontalSet = LineDataSet(entries, "").apply {
+                        color = stageColors[stageToDraw]
+                        setDrawFilled(true)
+                        fillColor = stageColors[stageToDraw]
+                        setFillAlpha(255)
+                        setDrawCircles(false)
+                        setDrawValues(false)
+                        setDrawHighlightIndicators(false)
+                        mode = LineDataSet.Mode.LINEAR
+                        lineWidth = 0f
+                    }
+                    dataSets.add(horizontalSet)
+                }
+
+                // draw vertical transition to next stage
+                if (i < sleepStages.size - 1 && sleepStages[i + 1] != napStage && sleepStages[i + 1] != noSleep) {
+                    val nextStage = sleepStages[i + 1]
+                    if (stageToDraw != nextStage) {  // Only draw if stages are different
+                        val verticalSet = LineDataSet(
+                            listOf(
+                                Entry(x2, stageToDraw.toFloat()),
+                                Entry(x2, nextStage.toFloat())
+                            ),
+                            ""
+                        ).apply {
+                            color = stageColors[stageToDraw]
+                            lineWidth = 0.5f
+                            setDrawCircles(false)
+                            setDrawValues(false)
+                            setDrawHighlightIndicators(false)
+                            mode = LineDataSet.Mode.LINEAR
+                        }
+                        dataSets.add(verticalSet)
+                    }
+                }
+                startIndex = i
+            }
+        }
+        val hrDataSet = mutableListOf<ILineDataSet>()
+        val currentEntries = mutableListOf<Entry>()
+
+        val minHrValue = hrValues.minOrNull() ?: 40f
+        val maxHrValue = hrValues.maxOrNull() ?: 120f
+
+        for ((time, hr) in timeStamps.zip(hrValues)) {
+            when {
+                hr == -1f -> {
+                    if (currentEntries.isNotEmpty()) {
+                        val segment = LineDataSet(currentEntries.toList(), "Heart Rate").apply {
+                            color = Color.parseColor("#E53935")
+                            mode = LineDataSet.Mode.CUBIC_BEZIER
+                            cubicIntensity = 0.05f
+                            lineWidth = 1.2f
+                            setDrawCircles(false)
+                            setDrawValues(false)
+                            axisDependency = YAxis.AxisDependency.RIGHT
+                        }
+                        hrDataSet.add(segment)
+                        currentEntries.clear()
+                    }
+                }
+                hr > 0f -> {
+                    currentEntries.add(Entry(time, normalizeHr(hr, minHrValue, maxHrValue)))
+                }
+                // hr == 0f → skip silently
+            }
+        }
+
+        if (currentEntries.isNotEmpty()) {
+            val lastSegment = LineDataSet(currentEntries.toList(), "Heart Rate").apply {
+                color = Color.parseColor("#E53935")
+                mode = LineDataSet.Mode.CUBIC_BEZIER
+                cubicIntensity = 0.05f
+                lineWidth = 1.2f
+                setDrawCircles(false)
+                setDrawValues(false)
+                axisDependency = YAxis.AxisDependency.RIGHT
+            }
+            hrDataSet.add(lastSegment)
+        }
+
+        mainDispatcher.launch {
+            binding.Cbheartrategraph.isChecked = SharedPreference.isSleepHrGraphEnabled
+        }
+
+        for (segment in hrDataSet) {
+            if (SharedPreference.isSleepHrGraphEnabled) {
+                if (!dataSets.contains(segment)) {
+                    dataSets.add(segment)
+                }
+            } else {
+                dataSets.remove(segment)
+            }
+        }
+
+        dataSetsGlobal = dataSets
+        this.hrDataSets = hrDataSet
+
+        createHyonogramChart(dataSetsGlobal)
+        if(binding.spindleSeekBar.progress == 0) {
+            binding.spindleSeekBar.post {
+                refreshSpindleSeekbar(0)
+                setHighlightPosition(0)
+            }
+        } else {
+            binding.spindleSeekBar.progress = 0
+        }
+    }
+
+    private fun normalizeHr(hr: Float, minHr: Float, maxHr: Float): Float {
+        val targetMin = 0.7f
+        val targetMax = 1.8f
+        return ((hr - minHr) / (maxHr - minHr)) * (targetMax - targetMin) + targetMin
+    }
+
+    private fun createHyonogramChart(dataSets: MutableList<ILineDataSet>) {
+        val maxTime = timeStamps.maxOrNull() ?: 1440f
+        val minTime = timeStamps.minOrNull() ?: 0f
+
+        val lineData = LineData(dataSets)
+        val combinedData = CombinedData()
+        combinedData.setData(lineData)
+
+        binding.chartToday.apply {
+            setViewPortOffsets(0f, 0f, 0f, 0f)
+            setExtraOffsets(0f, 0f, 0f, 0f)
+            data = combinedData
+            val xPadding = (maxTime - minTime) * 0.001f
+            xAxis.axisMinimum = minTime - xPadding
+            xAxis.axisMaximum = maxTime + xPadding
+            setTouchEnabled(false)
+            setPinchZoom(false)
+            description.isEnabled = false
+            legend.isEnabled = false
+
+            axisLeft.apply {
+                axisMinimum = -0.5f
+                axisMaximum = 3.5f
+                granularity = 1f
+                setDrawLabels(false) // Hide Y-axis labels
+                setDrawGridLines(false)
+                setDrawAxisLine(false) //This removes the vertical line on the left
+                isInverted = true
+            }
+
+            axisRight.apply {
+                isEnabled = false
+                axisMinimum = -0.3f
+                axisMaximum = 2f
+                granularity = 1f
+                textColor = Color.RED
+                isInverted = false
+                setDrawGridLines(false)
+            }
+
+
+            xAxis.apply {
+                setDrawLabels(false) // Hide X-axis labels
+                setDrawGridLines(false)
+                setDrawAxisLine(false)
+            }
+
+            invalidate()
+        }
+    }
+
+    private fun toggleHeartRateGraph(show: Boolean) {
+        mainDispatcher.launch {
+            SharedPreference.isSleepHrGraphEnabled = show
+
+            if (show) {
+                SharedPreference.isSleepHrGraphEnabled = true
+                dataSetsGlobal.addAll(hrDataSets)
+                if (inBetweenHrRange && binding.Cbheartrategraph.isChecked && selectedHrValue > 0) {
+                    binding.Cbheartrategraph.text = "Heart Rate: $selectedHrValue bpm"
+                    binding.rippleBackground.visibility = View.VISIBLE
+                } else {
+                    binding.Cbheartrategraph.text = "Heart Rate: --"
+                }
+            } else {
+                dataSetsGlobal.removeAll(hrDataSets)
+                binding.rippleBackground.visibility = View.INVISIBLE
+                binding.Cbheartrategraph.text = "Heart Rate"
+                SharedPreference.isSleepHrGraphEnabled = false
+            }
+            createHyonogramChart(dataSetsGlobal)
+        }
+    }
+
+    private fun setMonthXAxis(maxDay: Int) {
+        binding.chart.notifyDataSetChanged()
+        binding.chart.apply {
+            xAxis.apply {
+                axisMinimum = 0f
+                axisMaximum = (maxDay + 1).toFloat()
+                granularity = 1f
+                setDrawGridLines(false)
+                setDrawAxisLine(true)
+                setDrawLabels(true)
+                setLabelCount(maxDay, true)
+                xAxis.labelCount = maxDay
+                xAxis.isGranularityEnabled = true
+                position = XAxis.XAxisPosition.BOTTOM
+
+                textSize = 11f
+                textColor = Color.BLACK
+                yOffset = 9f
+                labelRotationAngle = 0f
+
+                valueFormatter = object : ValueFormatter() {
+                    override fun getFormattedValue(value: Float): String {
+                        val i = value.toInt()
+                        // show only multiples of 7 (7,14,21,28), leave others blank
+                        return if (i in 1..maxDay && i % 7 == 0) i.toString() else ""
+                    }
+                }
+            }
+            clipToPadding = false
+            clipChildren = false
+
+            invalidate()
+        }
+    }
+
+    private fun setWeekXAxis() {
+        val days = listOf("Mon","Tue","Wed","Thu","Fri","Sat","Sun")
+
+        val rotatedDays = if (viewModel.isCustomWeekDay()) {
+            val start = viewModel.weekDay()
+            (0 until 7).map { i -> days[(start - 1 + i) % 7] }
+        } else {
+            days
+        }
+
+        binding.chart.apply {
+            xAxis.apply {
+                axisMinimum = 0f
+                axisMaximum = 8f
+                granularity = 1f
+                labelCount = 9
+
+                position = XAxis.XAxisPosition.BOTTOM
+                setDrawLabels(true)
+                setDrawAxisLine(true)
+                axisLineColor = Color.LTGRAY
+                axisLineWidth = 0.5f
+                setDrawGridLines(false)
+
+                textSize = 11f
+                textColor = Color.BLACK
+                yOffset = 9f
+
+                valueFormatter = object : ValueFormatter() {
+                    override fun getFormattedValue(value: Float): String {
+                        val i = value.toInt()
+                        return if (i in 1..7) rotatedDays[i - 1] else ""
+                    }
+                }
+            }
+
+            invalidate()
+        }
+    }
+
+    private fun ptToPx(context: Context, pt: Float): Int {
+        return TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_PT,
+            pt,
+            context.resources.displayMetrics
+        ).toInt()
+    }
+
+
+    private fun getThumb(top: String): BitmapDrawable {
+        val topTextView = thumbView?.findViewById<TextView>(R.id.top_text)
+
+        topTextView?.apply {
+            text = top
+            setTextColor(Color.parseColor("#666666"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            setTextAppearance(R.style.HrText)
+        }
+        val container = thumbView?.findViewById<LinearLayout>(R.id.container)
+        val layoutParams = container?.layoutParams
+        layoutParams?.height = ptToPx(requireContext(), 10f)
+        layoutParams?.width = ptToPx(requireContext(), 40f)
+        container?.layoutParams = layoutParams
+            (thumbView?.findViewById(R.id.container) as LinearLayout).background =
+                context?.let {
+                    ContextCompat.getDrawable(
+                        it,
+                        R.drawable.background_summary_spindle_hr
+                    )
+                }
+        thumbView?.measure(
+            View.MeasureSpec.UNSPECIFIED,
+            View.MeasureSpec.UNSPECIFIED
+        )
+        val bitmap = Bitmap.createBitmap(
+            thumbView?.measuredWidth ?: 0,
+            thumbView?.measuredHeight ?: 0,
+            Bitmap.Config.ARGB_8888
+        )
+        val canvas = Canvas(bitmap)
+        thumbView?.layout(0, 0, thumbView?.measuredWidth ?: 0, thumbView?.measuredHeight ?: 0)
+        thumbView?.draw(canvas)
+        return BitmapDrawable(resources, bitmap)
+    }
+
+    private fun getThumbWeek(
+        model: SleepModel,
+        day: Date, thumbText: String,
+        markerBinding: LayoutSeekbarThumbSleepBinding
+    ) {
+        val deepSleepText = markerBinding.deepText
+        val awakeTextView = markerBinding.awakeText
+        val sleepDuration = markerBinding.sleepDuration
+        val remTextView = markerBinding.remText
+        val lightTextView = markerBinding.lightText
+        val totalSleep = markerBinding.totalDuration
+        val napCard = markerBinding.llNapCard
+        val napSleepText = markerBinding.napText
+        val sleepDate = markerBinding.dateText
+        val container = markerBinding.sleepContainer
+
+        napCard.visibility = if (model.napSleep > 0) View.VISIBLE else View.INVISIBLE
+
+        val total = model.deepSleep + model.awakeSleep + model.lightSleep + model.remSleep + model.napSleep
+        if (total <= 0) {
+            sleepDate.text = d2_m3.format(day)
+            napSleepText.specificSleepDuration(true, 120, true)
+            deepSleepText.specificSleepDuration(true, 50)
+            awakeTextView.specificSleepDuration(true, 30, true)
+            remTextView.specificSleepDuration(true, 48)
+            lightTextView.specificSleepDuration(true, 36)
+            totalSleep.specificSleepDuration(true, 289)
+            sleepDuration.text = "00:00 AM - 00:00 AM"
+            container.visibility = View.INVISIBLE
+            isRecordExist = false
+        } else {
+            container.visibility = View.VISIBLE
+            isRecordExist = true
+            container.background = context?.let {
+                ContextCompat.getDrawable(
+                    it,
+                    R.drawable.background_summary_spindle_sleep
+                )
+            }
+        }
+
+        napCard.visibility = if (model.napSleep > 0) View.VISIBLE else View.GONE
+        napSleepText.specificSleepDuration(true, model.napSleep, true)
+        deepSleepText.specificSleepDuration(true, model.deepSleep)
+        awakeTextView.specificSleepDuration(true, model.awakeSleep, true)
+        remTextView.specificSleepDuration(true, model.remSleep)
+        lightTextView.specificSleepDuration(true, model.lightSleep)
+        totalSleep.specificSleepDuration(true, total)
+        sleepDate.text = d2_m3.format(day)
+        if(thumbText.isNotEmpty()) {
+                sleepDuration.visibility = View.VISIBLE
+                sleepDuration.text = thumbText
+        }else{
+                sleepDuration.text = "00:00 AM - 00:00 AM"
+                sleepDuration.visibility = View.INVISIBLE
+        }
+    }
+
+    private fun setHighlightPosition(progress: Int) {
+        if (hrValues.isNotEmpty() || progress < sleepStages.size) {
+            try {
+                val maxProgress = binding.highLightSeekBar.max
+                val tenPercent = maxProgress * 0.095
+                binding.highLightSeekBar.progress = progress.coerceIn(
+                    minimumValue = tenPercent.toInt(),
+                    maximumValue = (binding.highLightSeekBar.max - tenPercent.toInt())
+                )
+            } catch (_: Exception) {
+                binding.highLightSeekBar.progress = progress
+            }
+
+            val hrTime = Date(sleepStageTimestamps[progress]).formatTime()
+            binding.highLightSeekBar.thumb = getThumb(hrTime)
+        }
+    }
+
+    private fun padSleep(list: List<Int>, useWeek: Boolean = false): List<Int> {
+        val targetSize = if (useWeek) {
+            7
+        } else {
+            val cal = Calendar.getInstance()
+            cal.getActualMaximum(Calendar.DAY_OF_MONTH)
+        }
+        return List(targetSize) { i ->
+            if (i < list.size) {
+                list[i] // existing value
+            } else {
+                i + 1   // fill with day number
+            }
+        }
+    }
+
+    private fun insertMissingFromStart(list: List<Int>): List<Int> {
+        if (list.isEmpty()) return list
+
+        val result = mutableListOf<Int>()
+        val first = list.first()
+
+        for (i in 1 until first) {
+            result.add(i)
+        }
+
+        result.addAll(list)
+
+        return result
+    }
+
+
+    private fun setHighlightPositionWeekMarker(
+        progress: Int,
+        weekView: Boolean,
+        markerBinding: LayoutSeekbarThumbSleepBinding
+    ) {
+        try {
+            val paddedSleepKeys = padSleep(sleepKeys, weekView)
+
+            val totalBars = paddedSleepKeys.size
+            if (totalBars == 0) return
+
+            val mappedIndex = ((progress.toFloat() / totalBars) * totalBars)
+                .toInt()
+                .coerceAtMost(totalBars - 1)
+            val validSleepKeys = insertMissingFromStart(sleepKeys)
+
+            if (mappedIndex in validSleepKeys.indices) {
+                val key = validSleepKeys[mappedIndex]
+                val sleepModel = sleepSummaryMap[key] ?: return
+
+                currentBaseDate?.let { baseDate ->
+                    val date = getDateFromKey(baseDate, mappedIndex)
+                    val record = SharedPreference.sleepRecordMap[date.toString()] ?: ""
+                    val (startEpoch, endEpoch) = parseRecord(record)
+
+                    val startTimeStr = startEpoch?.let { Date(it).formatTime() }
+                    val endTimeStr = endEpoch?.let { Date(it).formatTime() }
+
+                    // Combine for thumb text
+                    val thumbText = if (startTimeStr?.isNotEmpty() == true && endTimeStr?.isNotEmpty() == true) {
+                        "$startTimeStr - $endTimeStr"
+                    } else {
+                        "" // empty if no data
+                    }
+                    getThumbWeek(sleepModel, date, thumbText, markerBinding)
+                }
+            }else {
+                isRecordExist = false
+                markerBinding.sleepContainer.visibility = View.INVISIBLE
+            }
+        } catch (e: Exception) {
+            println("error in setHighlightPositionWeekMarker: ${e.message}")
+            e.printStackTrace()
+            // Optionally hide marker in case of error
+            isRecordExist = false
+            markerBinding.sleepContainer.visibility = View.INVISIBLE
+        }
+    }
+
+    private fun parseRecord(record: String?): Pair<Long?, Long?> {
+        if (record.isNullOrBlank()) return null to null
+        val parts = record.split(",")
+        if (parts.size != 2) return null to null
+        val start = parts[0].toLongOrNull()
+        val end = parts[1].toLongOrNull()
+        return start to end
+    }
+
+    private val spindleSeekBarListener = object : SeekBar.OnSeekBarChangeListener {
+        var startTime = 0L
+        override fun onProgressChanged(seekbar: SeekBar, progress: Int, fromUser: Boolean) {
+            binding.chartToday.post {
+                currentHrProgress = progress
+                refreshSpindleSeekbar(progress)
+                setHighlightPosition(progress)
+            }
+        }
+
+        override fun onStartTrackingTouch(seekbar: SeekBar) {
+            startTime = Date().time
+        }
+
+        override fun onStopTrackingTouch(seekbar: SeekBar) {
+            if (startTime > 0) {
+                duration(Date().time, "sleep_spindle_day", endTime(startTime))
+            }
+            startTime = 0
+        }
+    }
+
+    // Highlights the current sleep stage on the seekbar and displays its name, time range, and duration based on the selected progress.
+    private fun refreshSpindleSeekbar(progress: Int) {
+        if (progress < sleepStages.size) {
+            val selectedStage = sleepStages[progress]
+
+            if(hrValues.isNotEmpty() && progress < hrValues.size) {
+                val lastNonZeroHrIndex = hrValues.indexOfLast { it > 0 }
+                val firstNonZeroHrIndex = hrValues.indexOfFirst { it > 0 }
+
+                inBetweenHrRange = progress in firstNonZeroHrIndex..lastNonZeroHrIndex
+
+                val hr = hrValues[progress].toInt()
+                selectedHrValue = hr
+                if (progress < hrValues.size && hr > 0 && binding.Cbheartrategraph.isChecked) {
+                    binding.Cbheartrategraph.text = "Heart Rate: $hr bpm"
+                } else if (!binding.Cbheartrategraph.isChecked) {
+                    binding.Cbheartrategraph.text = "Heart Rate"
+                } else {
+                    binding.Cbheartrategraph.text = "Heart Rate: --"
+                }
+            }
+                updateCurrentHrDot(progress)
+
+            // Find start of this stage stretch
+            var startIndex = progress
+            while (startIndex > 0 && sleepStages[startIndex - 1] == selectedStage) {
+                startIndex--
+            }
+
+            // Find end of this stage stretch
+            var endIndex = progress
+            while (endIndex < sleepStages.size - 1 && sleepStages[endIndex + 1] == selectedStage) {
+                endIndex++
+            }
+
+            val stageName = when (selectedStage) {
+                0 -> "Awake"
+                1 -> "REM"
+                2 -> "Light Sleep"
+                3 -> "Deep Sleep"
+                4 -> "Nap"
+                else -> "Unknown"
+            }
+
+            // Ensure valid access to timeStamps
+            if (startIndex < sleepStageTimestamps.size && endIndex + 1 < sleepStageTimestamps.size) {
+                val startMin = sleepStageTimestamps[startIndex]
+                val endMin = sleepStageTimestamps[endIndex + 1]
+
+                val startTime = Date(startMin).formatTime()
+                val endTime = Date(endMin).formatTime()
+
+                val durationMin = getSleepDuration(requireContext() , startMin , endMin )
+
+                binding.tvSleepInfo.text = if (stageName == "Unknown") {
+                    ""
+                } else {
+                    "$stageName: $startTime - $endTime ($durationMin)"
+                }
+            } else {
+                val validStart = sleepStageTimestamps.getOrNull(startIndex)
+                val validEnd = sleepStageTimestamps.getOrNull(endIndex)
+
+                if (validStart != null && validEnd != null) {
+                    val startTime = Date(validStart).formatTime()
+                    val endTime = Date(validEnd).formatTime()
+
+                    val durationMin = getSleepDuration(requireContext() , validStart, validEnd)
+                    binding.tvSleepInfo.text = if (stageName == "Unknown") {
+                        ""
+                    } else {
+                        "$stageName: $startTime - $endTime ($durationMin)"
+                    }
+                }
+            }
+        } else {
+            binding.tvSleepInfo.text = ""
+        }
+    }
+
+    private fun updateCurrentHrDot(progress: Int) {
+        if (!SharedPreference.isSleepHrGraphEnabled) {
+            mainDispatcher.launch { binding.rippleBackground.visibility = View.INVISIBLE }
+            return
+        }
+
+        val chart = binding.chartToday
+        val hrDotView = binding.rippleBackground
+
+        if (
+            progress !in timeStamps.indices ||
+            progress >= hrValues.size ||
+            hrValues[progress] <= 0f
+        ) {
+            mainDispatcher.launch { hrDotView.visibility = View.INVISIBLE }
+        } else {
+            val hr = hrValues[progress]
+            val maxHrValue = hrValues.maxOrNull() ?: 120f
+            val minHrValue = hrValues.minOrNull() ?: 40f
+
+            val dotEntry = Entry(
+                timeStamps[progress],
+                normalizeHr(hr, minHrValue, maxHrValue)
+            )
+
+            hrDotView.post {
+                val chartLocation = IntArray(2)
+                chart.getLocationOnScreen(chartLocation)
+                val chartX = chartLocation[0]
+                val chartY = chartLocation[1]
+
+                val rootLocation = IntArray(2)
+                (chart.parent as View).getLocationOnScreen(rootLocation)
+                val rootX = rootLocation[0]
+                val rootY = rootLocation[1]
+
+                val pixelPoint = chart.getTransformer(YAxis.AxisDependency.RIGHT)
+                    .getPixelForValues(dotEntry.x, dotEntry.y)
+
+                val finalX = chartX - rootX + pixelPoint.x + chart.paddingLeft - hrDotView.width / 2f
+                val finalY = chartY - rootY + pixelPoint.y + chart.paddingTop - hrDotView.height / 2f
+
+                hrDotView.translationX = finalX.toFloat()
+                hrDotView.translationY = finalY.toFloat()
+
+                mainDispatcher.launch { hrDotView.visibility = View.VISIBLE }
+            }
+        }
+    }
+
+    private fun openSleepScoreInfoDialog() {
+        sleepScoreDialog?.dismiss()
+        sleepScoreDialog = context?.let { SleepScoreInfoDialog(it, binding.container) }
+        sleepScoreDialog?.show()
+    }
+
+    private fun scopeChangeEvent() {
+        when (viewModel.currentScope) {
+            SummaryScope.DAY -> {
+                if (startTime > 0) {
+                    duration(startTime, "sleep_summary_day", endTime(startTime))
+                }
+                startTime = Date().time
+            }
+
+            SummaryScope.WEEK -> {
+                if (startTime > 0) {
+                    duration(startTime, "sleep_summary_week", endTime(startTime))
+                }
+                startTime = Date().time
+            }
+
+            SummaryScope.MONTH -> {
+                if (startTime > 0) {
+                    duration(startTime, "sleep_summary_month", endTime(startTime))
+                }
+                startTime = Date().time
+            }
+        }
+    }
+
+    fun updateCarouselArrows() {
+        if (viewModel.getScopeDate().canGoForward(viewModel.currentScope)) {
+            binding.nextIcon.visibility = View.VISIBLE
+        } else {
+            binding.nextIcon.visibility = View.INVISIBLE
+        }
+        if (viewModel.getScopeDate().canGoBackward(viewModel.currentScope)) {
+            binding.previousIcon.visibility = View.VISIBLE
+        } else {
+            binding.previousIcon.visibility = View.INVISIBLE
+        }
+    }
+
+    private val progressObserver = Observer<Boolean?> { bool ->
+        if (bool != null) {
+            loading(bool)
+        }
+
+    }
+
+    private fun loading(show: Boolean) {
+        if (loadingDialog?.isShowing() == true && show) {
+            return
+        }
+        if (show) {
+            loadingDialog = context?.let { GenericBottomDialog(it, binding.container) }
+            loadingDialog?.setTitle(null)
+            context?.getString(R.string.processing)?.let { loadingDialog?.setMessage(it) }
+            loadingDialog?.show()
+        } else {
+            loadingDialog?.dismiss()
+        }
+    }
+
+    private val dismissListener = object : OnDialogDismissListener {
+        override fun onDismiss() {
+            viewStateCallback = null
+            if (startTime == 0L) {
+                startTime = Date().time
+            }
+        }
+    }
+
+    private fun canDisplayHrvInSleep(products: List<WearableProduct>): Boolean {
+       return withSelectedWearableProduct {
+            products.isHrvInSleepSupported() ||
+                    (products.isEmpty() && (!wearablePaired() || getPairedWearableProducts().isHrvInSleepSupported()))
+       }
+    }
+
+    private fun canDisplayRespiratoryRate(products: List<WearableProduct>): Boolean {
+        return withSelectedWearableProduct {
+            products.isRespiratoryRateSupportedProducts() || (products.isEmpty() && (!wearablePaired() || getPairedWearableProducts().isRespiratoryRateSupportedProducts()))
+        }
+    }
+
+    private fun canDisplayRemSleepLayout(products: List<WearableProduct>, totalRemSleep: Int): Boolean {
+//        return withSelectedWearableProduct { totalRemSleep > 0 || products.isRemSleepSupportedProducts() || (products.isEmpty() && (!wearablePaired() || getPairedWearableProducts().isRemSleepSupportedProducts()))}
+        return true
+    }
+
+    private fun canDisplayNapSleepLayout(products: List<WearableProduct>, totalNapSleep: Int): Boolean {
+        return withSelectedWearableProduct { totalNapSleep > 0 || products.isNapSleepSupportedProducts() || (products.isEmpty() && (!wearablePaired() || getPairedWearableProducts().isNapSleepSupportedProducts())) }
+    }
+
+    private fun canDisplayAwakeSleepLayout(products: List<WearableProduct>, totalAwakeSleep: Int): Boolean {
+//        return withSelectedWearableProduct { totalAwakeSleep > 0 || products.isAwakeSleepSupportedProducts() || (products.isEmpty() && (!wearablePaired() || getPairedWearableProducts().isAwakeSleepSupportedProducts())) }
+        return true
+    }
+
+    private fun canDisplayTimeToFallSleepLayout(products: List<WearableProduct>): Boolean {
+        return withSelectedWearableProduct { products.isTimeToFallSleepSupportedProducts() || (products.isEmpty() && (!wearablePaired() || getPairedWearableProducts().isTimeToFallSleepSupportedProducts())) }
+    }
+
+
+    private fun TextView.totalSleepDaily(value: Int) {
+        if (value <= 0) {
+            this.text = "--"
+            return
+        }
+        val hrMin = Pair(value / 60, value % 60)
+        val span1 = SpannableString("${hrMin.first}")
+        span1.setSpan(
+            RelativeSizeSpan(1f), 0,
+            span1.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        val span2 = SpannableString(" hr")
+        span2.setSpan(
+            RelativeSizeSpan(0.5f), 0,
+            span2.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        span2.setSpan(
+            CustomTypefaceSpan(ResourcesCompat.getFont(context, R.font.oswald_light)),
+            0, span2.length,
+            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        val span3 = SpannableString(" ${hrMin.second}")
+        span3.setSpan(
+            RelativeSizeSpan(1f), 0,
+            span3.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        val span4 = SpannableString(" min")
+        span4.setSpan(
+            RelativeSizeSpan(0.5f), 0,
+            span4.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        span4.setSpan(
+            CustomTypefaceSpan(ResourcesCompat.getFont(context, R.font.oswald_light)),
+            0, span4.length,
+            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        this.text = when {
+            hrMin.first == 0 -> {
+                TextUtils.concat(span3, span4)
+            }
+
+            hrMin.first > 0 && hrMin.second == 0 -> {
+                TextUtils.concat(span1, span2)
+            }
+
+            else -> {
+                TextUtils.concat(span1, span2, span3, span4)
+            }
+        }
+    }
+
+    private fun TextView.specificSleepDuration(isActualSleep: Boolean, value: Int, showDashIfZero: Boolean = false) {
+        if (!isActualSleep || value < 0) {
+            this.text = "--"
+            return
+        }
+        if (showDashIfZero && value == 0) {
+            this.text = "--"
+            return
+        }
+        val hours = value / 60
+        val minutes = value % 60
+        val formattedMinutes = String.format("%02d", minutes) // always 2 digits
+
+        val span1 = SpannableString("$hours ").apply {
+            setSpan(RelativeSizeSpan(1.2f), 0, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+
+        val span2 = SpannableString("hr ").apply {
+            setSpan(RelativeSizeSpan(0.9f), 0, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            setSpan(
+                CustomTypefaceSpan(ResourcesCompat.getFont(context, R.font.oswald_light)),
+                0, length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        }
+
+        val span3 = SpannableString("$formattedMinutes ").apply {
+            setSpan(RelativeSizeSpan(1.2f), 0, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+
+        val span4 = SpannableString("min").apply {
+            setSpan(RelativeSizeSpan(0.9f), 0, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            setSpan(
+                CustomTypefaceSpan(ResourcesCompat.getFont(context, R.font.oswald_light)),
+                0, length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        }
+
+        this.text = when {
+            hours == 0 -> TextUtils.concat(span3, span4)                // only mins
+            else -> TextUtils.concat(span1, span2, span3, span4)        // always hrs + mins (even if 00)
+        }
+    }
+
+
+    private fun TextView.dailyGoalDaily(value: Int) {
+        if (value <= 0) {
+            this.text = "--"
+            return
+        }
+        val hrMin = Pair(value / 60, value % 60)
+        val span1 = SpannableString("Daily Goal ${hrMin.first} ")
+        span1.setSpan(
+            RelativeSizeSpan(1f), 0,
+            span1.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        val unit = "hr"
+        val span2 = SpannableString(unit)
+        span2.setSpan(
+            RelativeSizeSpan(0.9f), 0,
+            span2.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        this.text = TextUtils.concat(span1, span2)
+    }
+
+    private fun TextView.heartRateVariabilityHypnogram(value: Int) {
+        if (value <= 0) {
+            this.text = "--"
+            return
+        }
+        val span1 = SpannableString("$value ")
+        span1.setSpan(
+            RelativeSizeSpan(1.3f), 0,
+            span1.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        val unit = "ms"
+        val span2 = SpannableString(unit)
+        span2.setSpan(
+            RelativeSizeSpan(0.8f), 0,
+            span2.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        span2.setSpan(
+            CustomTypefaceSpan(ResourcesCompat.getFont(context, R.font.oswald_light)),
+            0, span2.length,
+            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        this.text = TextUtils.concat(span1, span2)
+    }
+
+    private fun TextView.respiratoryRateHypnogram(value: Int) {
+        if (value <= 0) {
+            this.text = "--"
+            return
+        }
+
+        val span1 = SpannableString("$value ")
+        span1.setSpan(
+            RelativeSizeSpan(1.2f), 0,
+            span1.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        /*As per FRW-29162 changed BrPM to Brpm*/
+        val unit = "Brpm"
+        val span2 = SpannableString(unit)
+        span2.setSpan(
+            RelativeSizeSpan(0.9f), 0,
+            span2.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        span2.setSpan(
+            CustomTypefaceSpan(ResourcesCompat.getFont(context, R.font.oswald_light)),
+            0, span2.length,
+            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        this.text = TextUtils.concat(span1, span2)
+    }
+}
+
+class YAxisValueFormatter(val maxHour: Int) : ValueFormatter() {
+    override fun getAxisLabel(value: Float, axis: AxisBase): String {
+        val hour = value / 60
+        return when {
+            maxHour == 2 -> {
+                hour.toInt().toString()
+            }
+            hour % 2 == 0f -> {
+                hour.toInt().toString()
+
+            }
+            else -> {
+                ""
+            }
+        }
+    }
+}
