@@ -1,0 +1,685 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="?backgroundColor"
+    tools:context=".fragment.StressFragment">
+
+
+    <ScrollView
+        android:id="@+id/scroll_view"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:id="@+id/container"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <androidx.constraintlayout.widget.ConstraintLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
+
+                <androidx.constraintlayout.widget.ConstraintLayout
+                    android:id="@+id/stress_screen_top"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    app:layout_constraintEnd_toEndOf="parent"
+                    app:layout_constraintStart_toStartOf="parent"
+                    app:layout_constraintTop_toTopOf="parent">
+
+                    <ImageView
+                        android:id="@+id/back_button"
+                        android:layout_width="0dp"
+                        android:layout_height="0dp"
+                        android:layout_marginStart="@dimen/big_padding"
+                        android:layout_marginTop="15pt"
+                        android:contentDescription="@string/back_button"
+                        android:padding="1pt"
+                        android:src="@drawable/ic_back"
+                        app:layout_constraintDimensionRatio="1"
+                        app:layout_constraintStart_toStartOf="parent"
+                        app:layout_constraintTop_toTopOf="parent"
+                        app:layout_constraintWidth_percent="0.07"
+                        app:layout_goneMarginStart="15pt" />
+
+                    <androidx.constraintlayout.widget.Guideline
+                        android:id="@+id/guideline_v_45"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        app:layout_constraintGuide_percent="0.45" />
+
+                    <androidx.constraintlayout.widget.Guideline
+                        android:id="@+id/guideline_v_65"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        app:layout_constraintGuide_percent="0.65" />
+
+                    <View
+                        android:id="@+id/line"
+                        android:layout_width="0.5pt"
+                        android:layout_height="15pt"
+                        android:background="?colorOnPrimary"
+                        app:layout_constraintBottom_toBottomOf="@+id/back_button"
+                        app:layout_constraintEnd_toStartOf="@+id/guideline_v_45"
+                        app:layout_constraintStart_toStartOf="@+id/guideline_v_45"
+                        app:layout_constraintTop_toTopOf="@+id/back_button" />
+
+                    <ImageView
+                        android:id="@+id/icon"
+                        android:layout_width="15pt"
+                        android:layout_height="15pt"
+                        android:layout_marginEnd="12pt"
+                        android:contentDescription="@string/page_icon_cd"
+                        android:src="@drawable/ic_stress_summary"
+                        app:layout_constraintBottom_toBottomOf="@+id/back_button"
+                        app:layout_constraintEnd_toStartOf="@+id/line"
+                        app:layout_constraintTop_toTopOf="@+id/back_button" />
+
+                    <TextView
+                        android:id="@+id/title"
+                        style="@style/primaryText"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="12pt"
+                        android:contentDescription="@string/page_title_cd"
+                        android:fontFamily="@font/oswald_medium"
+                        android:text="@string/stress"
+                        android:textSize="12pt"
+                        app:layout_constraintBottom_toBottomOf="@+id/line"
+                        app:layout_constraintStart_toEndOf="@+id/line"
+                        app:layout_constraintTop_toTopOf="@+id/line" />
+
+                    <TextView
+                        android:id="@+id/date_text"
+                        style="@style/secondaryText"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/big_padding"
+                        android:layout_weight="1"
+                        android:contentDescription="@string/current_date_text"
+                        android:fontFamily="@font/poppins_medium"
+                        android:gravity="center"
+                        android:textSize="10pt"
+                        app:layout_constraintEnd_toEndOf="parent"
+                        app:layout_constraintStart_toStartOf="parent"
+                        app:layout_constraintTop_toBottomOf="@+id/title"
+                        app:layout_constraintWidth_percent="0.45"
+                        tools:text="Today" />
+
+                    <ImageView
+                        android:id="@+id/previous_icon"
+                        android:layout_width="0dp"
+                        android:layout_height="0dp"
+                        android:layout_marginEnd="@dimen/normal_padding"
+                        android:contentDescription="@string/previous_day"
+                        android:padding="1.5pt"
+                        android:src="@drawable/ic_arrow_back"
+                        app:layout_constraintBottom_toBottomOf="@+id/date_text"
+                        app:layout_constraintDimensionRatio="1:1"
+                        app:layout_constraintEnd_toStartOf="@+id/date_text"
+                        app:layout_constraintTop_toTopOf="@+id/date_text"
+                        app:layout_constraintWidth_percent="0.06" />
+
+                    <ImageView
+                        android:id="@+id/next_icon"
+                        android:layout_width="0dp"
+                        android:layout_height="0dp"
+                        android:layout_marginStart="@dimen/normal_padding"
+                        android:contentDescription="@string/next_day"
+                        android:padding="1.5pt"
+                        android:src="@drawable/ic_arrow_fwd"
+                        app:layout_constraintBottom_toBottomOf="@+id/date_text"
+                        app:layout_constraintDimensionRatio="1:1"
+                        app:layout_constraintStart_toEndOf="@+id/date_text"
+                        app:layout_constraintTop_toTopOf="@+id/date_text"
+                        app:layout_constraintWidth_percent="0.06" />
+
+                    <ImageView
+                        android:id="@+id/calendar"
+                        android:layout_width="0dp"
+                        android:layout_height="0dp"
+                        android:contentDescription="@string/calender"
+                        android:src="@drawable/ic_calendar_light"
+                        app:layout_constraintBottom_toBottomOf="@+id/next_icon"
+                        app:layout_constraintDimensionRatio="1:1"
+                        app:layout_constraintEnd_toEndOf="parent"
+                        app:layout_constraintStart_toEndOf="@+id/next_icon"
+                        app:layout_constraintWidth_percent="0.06" />
+
+                    <fastrack.reflex.widget.SummarySwitch
+                        android:id="@+id/summarySwitch"
+                        android:layout_width="0dp"
+                        android:layout_height="24pt"
+                        android:layout_marginTop="@dimen/normal_padding"
+                        app:layout_constraintEnd_toEndOf="parent"
+                        app:layout_constraintStart_toStartOf="parent"
+                        app:layout_constraintTop_toBottomOf="@id/date_text"
+                        app:layout_constraintWidth_percent="0.8" />
+                </androidx.constraintlayout.widget.ConstraintLayout>
+
+                <androidx.constraintlayout.widget.ConstraintLayout
+                    android:id="@+id/chart_view"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    app:layout_constraintEnd_toEndOf="parent"
+                    app:layout_constraintStart_toStartOf="parent"
+                    app:layout_constraintTop_toBottomOf="@id/stress_screen_top">
+
+                    <androidx.constraintlayout.widget.ConstraintLayout
+                        android:id="@+id/chart_layout"
+                        android:layout_width="0dp"
+                        android:layout_height="0dp"
+                        android:layout_marginTop="@dimen/small_padding"
+                        app:layout_constraintDimensionRatio="1:0.7"
+                        app:layout_constraintEnd_toEndOf="parent"
+                        app:layout_constraintStart_toStartOf="parent"
+                        app:layout_constraintTop_toTopOf="parent">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:drawableStart="@drawable/ic_avg"
+                            android:drawablePadding="5pt"
+                            android:fontFamily="@font/poppins_medium"
+                            android:paddingEnd="30dp"
+                            android:text="@string/average"
+                            android:textColor="#575757"
+                            android:textSize="6pt"
+                            app:layout_constraintBottom_toTopOf="@id/bar_chart"
+                            app:layout_constraintEnd_toEndOf="parent"
+                            app:layout_constraintTop_toTopOf="parent" />
+
+                        <com.github.mikephil.charting.charts.BarChart
+                            android:id="@+id/bar_chart"
+                            android:layout_width="0dp"
+                            android:layout_height="0dp"
+                            android:layout_marginTop="@dimen/normal_padding"
+                            android:visibility="visible"
+                            app:layout_constraintBottom_toTopOf="@+id/ruler_view"
+                            app:layout_constraintEnd_toEndOf="parent"
+                            app:layout_constraintStart_toStartOf="parent"
+                            app:layout_constraintTop_toBottomOf="@+id/type_text_view" />
+
+                        <fastrack.reflex.widget.TimeRulerView
+                            android:id="@+id/ruler_view"
+                            android:layout_width="0dp"
+                            android:layout_height="18pt"
+                            android:paddingStart="2pt"
+                            android:paddingTop="5pt"
+                            android:paddingEnd="2pt"
+                            android:visibility="gone"
+                            app:layout_constraintBottom_toBottomOf="parent"
+                            app:layout_constraintEnd_toStartOf="@id/guide_line_v_92"
+                            app:layout_constraintStart_toEndOf="@id/guide_line_v_15" />
+
+                        <TextView
+                            android:id="@+id/type_text_view"
+                            style="@style/primaryText"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="@dimen/very_small_padding"
+                            android:fontFamily="@font/poppins_medium"
+                            android:textColor="?colorAccent"
+                            android:textSize="6pt"
+                            android:visibility="gone"
+                            app:layout_constraintEnd_toStartOf="@+id/guide_line_v_15"
+                            app:layout_constraintTop_toTopOf="parent"
+                            tools:text="BPM" />
+
+                        <View
+                            android:id="@+id/bottom_bar"
+                            android:layout_width="0dp"
+                            android:layout_height="0.5pt"
+                            android:layout_marginBottom="1pt"
+                            android:background="?fourth"
+                            app:layout_constraintBottom_toTopOf="@id/ruler_view"
+                            app:layout_constraintEnd_toStartOf="@id/guide_line_v_92"
+                            app:layout_constraintStart_toEndOf="@id/guide_line_v_15" />
+
+                        <androidx.constraintlayout.widget.Guideline
+                            android:id="@+id/guide_line_v_15"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical"
+                            app:layout_constraintGuide_percent="0.15" />
+
+                        <androidx.constraintlayout.widget.Guideline
+                            android:id="@+id/guide_line_v_07"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical"
+                            app:layout_constraintGuide_percent="0.07" />
+
+                        <androidx.constraintlayout.widget.Guideline
+                            android:id="@+id/guide_line_v_92"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical"
+                            app:layout_constraintGuide_percent="0.92" />
+                    </androidx.constraintlayout.widget.ConstraintLayout>
+                </androidx.constraintlayout.widget.ConstraintLayout>
+
+                <androidx.constraintlayout.widget.ConstraintLayout
+                    android:id="@+id/summary_layout"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/normal_padding"
+                    app:layout_constraintEnd_toEndOf="parent"
+                    app:layout_constraintStart_toStartOf="parent"
+                    app:layout_constraintTop_toBottomOf="@id/chart_view">
+
+                    <androidx.constraintlayout.widget.Guideline
+                        android:id="@+id/summary_guide_line_v_15"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        app:layout_constraintGuide_percent="0.15" />
+
+                    <LinearLayout
+                        android:id="@+id/stress_percentage_layout"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="20dp"
+                        android:layout_marginEnd="12dp"
+                        android:orientation="vertical"
+                        app:layout_constraintEnd_toStartOf="@+id/stress_score_container"
+                        app:layout_constraintStart_toStartOf="parent"
+                        app:layout_constraintTop_toTopOf="parent">
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="8dp"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal">
+
+                            <TextView
+                                android:id="@+id/tvHighLabel"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:text="@string/high"
+                                android:textSize="14sp"
+                                android:textStyle="bold" />
+
+                            <TextView
+                                android:id="@+id/tvHighPercent"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginStart="8dp"
+                                android:textSize="18sp"
+                                tools:text="0%" />
+                        </LinearLayout>
+
+                        <com.google.android.material.progressindicator.LinearProgressIndicator
+                            android:id="@+id/progressHigh"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:layout_marginBottom="10dp"
+                            android:contentDescription="@string/stress_high_bar_cd"
+                            android:max="100"
+                            app:indicatorColor="?highStressColor"
+                            app:trackColor="@color/material_blue_grey_50"
+                            app:trackCornerRadius="25dp"
+                            app:trackThickness="10dp" />
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal">
+
+                            <TextView
+                                android:id="@+id/tvMediumLabel"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:text="@string/medium"
+                                android:textSize="14sp"
+                                android:textStyle="bold" />
+
+                            <TextView
+                                android:id="@+id/tvMediumPercent"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginStart="8dp"
+                                android:textSize="18sp"
+                                tools:text="0%" />
+                        </LinearLayout>
+
+                        <com.google.android.material.progressindicator.LinearProgressIndicator
+                            android:id="@+id/progressMedium"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:layout_marginBottom="10dp"
+                            android:contentDescription="@string/stress_medium_bar_cd"
+
+                            android:max="100"
+                            app:indicatorColor="?mediumStressColor"
+                            app:trackColor="@color/material_blue_grey_50"
+                            app:trackCornerRadius="25dp"
+                            app:trackThickness="10dp" />
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal">
+
+                            <TextView
+                                android:id="@+id/tvNormalLabel"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:text="@string/normal"
+                                android:textSize="14sp"
+                                android:textStyle="bold" />
+
+                            <TextView
+                                android:id="@+id/tvNormalPercent"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginStart="8dp"
+
+                                android:textSize="18sp"
+                                tools:text="0%" />
+                        </LinearLayout>
+
+                        <com.google.android.material.progressindicator.LinearProgressIndicator
+                            android:id="@+id/progressNormal"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:contentDescription="@string/stress_normal_bar_cd"
+
+                            android:max="100"
+                            app:indicatorColor="?normalStressColor"
+                            app:trackColor="@color/material_blue_grey_50"
+                            app:trackCornerRadius="25dp"
+                            app:trackThickness="10dp" />
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal">
+
+                            <TextView
+                                android:id="@+id/tvRelaxLabel"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:text="@string/relax"
+                                android:textSize="14sp"
+                                android:textStyle="bold" />
+
+                            <TextView
+                                android:id="@+id/tvRelaxPercent"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginStart="8dp"
+
+                                android:textSize="18sp"
+                                tools:text="0%" />
+                        </LinearLayout>
+
+                        <com.google.android.material.progressindicator.LinearProgressIndicator
+                            android:id="@+id/progressRelax"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:contentDescription="@string/stress_relax_bar_cd"
+                            android:max="100"
+                            app:indicatorColor="?relaxStressColor"
+                            app:trackColor="@color/material_blue_grey_50"
+                            app:trackCornerRadius="25dp"
+                            app:trackThickness="10dp" />
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:id="@+id/stress_score_container"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:padding="12dp"
+                        app:layout_constraintBottom_toBottomOf="parent"
+                        app:layout_constraintEnd_toEndOf="parent"
+                        app:layout_constraintTop_toTopOf="parent">
+
+                        <TextView
+                            android:id="@+id/stress_score_tv"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:fontFamily="@font/oswald_medium"
+                            android:gravity="center"
+                            android:textColor="?colorAccent"
+                            android:textSize="36pt"
+                            tools:text="90" />
+
+                        <LinearLayout
+                            android:id="@+id/stress_score_label_container"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_gravity="center_horizontal"
+                            android:gravity="center"
+                            android:orientation="horizontal">
+
+                            <TextView
+                                android:id="@+id/stress_score_label"
+                                style="@style/secondaryText"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:fontFamily="@font/poppins_medium"
+                                android:text="@string/avg_stress"
+                                android:textSize="6pt"
+                                tools:text="Stress Score" />
+
+                            <ImageView
+                                android:id="@+id/stress_score_info"
+                                android:layout_width="9pt"
+                                android:layout_height="9pt"
+                                android:layout_marginStart="4dp"
+                                android:contentDescription="@string/info"
+                                android:src="@drawable/ic_info" />
+                        </LinearLayout>
+
+                        <TextView
+                            android:id="@+id/stress_score_type"
+                            style="@style/secondaryText"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:fontFamily="@font/poppins_bold"
+                            android:textAlignment="center"
+                            android:textSize="6pt"
+                            tools:text="Extra Info" />
+                    </LinearLayout>
+                </androidx.constraintlayout.widget.ConstraintLayout>
+
+                <androidx.constraintlayout.widget.ConstraintLayout
+                    android:id="@id/min_max_layout"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    app:layout_constraintBottom_toBottomOf="parent"
+                    app:layout_constraintEnd_toEndOf="parent"
+                    app:layout_constraintStart_toStartOf="parent"
+                    app:layout_constraintTop_toBottomOf="@id/summary_layout">
+
+                    <androidx.constraintlayout.widget.ConstraintLayout
+                        android:id="@+id/min_stress_layout"
+                        android:layout_width="0dp"
+                        android:layout_height="0dp"
+                        android:layout_marginStart="@dimen/normal_padding"
+                        app:layout_constraintDimensionRatio="1:1"
+                        app:layout_constraintEnd_toStartOf="@id/max_stress_layout"
+                        app:layout_constraintStart_toStartOf="parent"
+                        app:layout_constraintTop_toTopOf="parent">
+
+                        <androidx.constraintlayout.widget.Guideline
+                            android:id="@+id/rest_heart_rate_guideline"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal"
+                            app:layout_constraintGuide_percent="0.6" />
+
+                        <TextView
+                            android:id="@+id/tvMinStress"
+                            style="@style/primaryText"
+                            android:layout_width="0dp"
+                            android:layout_height="0dp"
+                            android:contentDescription="@string/min_value_label"
+                            android:fontFamily="@font/oswald_regular"
+                            android:gravity="center|bottom"
+                            android:paddingStart="1pt"
+                            android:paddingEnd="1pt"
+                            android:singleLine="true"
+                            app:autoSizeMaxTextSize="20pt"
+                            app:autoSizeMinTextSize="10pt"
+                            app:autoSizeStepGranularity="1pt"
+                            app:autoSizeTextType="uniform"
+                            app:layout_constraintBottom_toTopOf="@+id/rest_heart_rate_guideline"
+                            app:layout_constraintEnd_toEndOf="parent"
+                            app:layout_constraintStart_toStartOf="parent"
+                            app:layout_constraintTop_toTopOf="parent"
+                            tools:text="64bpm"
+                            tools:textSize="@dimen/very_big_text" />
+
+                        <TextView
+                            android:id="@+id/tv_min_text"
+                            style="@style/secondaryText"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:fontFamily="@font/poppins_medium"
+                            android:gravity="center"
+                            android:text="@string/minimum"
+                            android:textSize="@dimen/big_text"
+                            app:layout_constraintEnd_toEndOf="parent"
+                            app:layout_constraintHorizontal_chainStyle="spread"
+                            app:layout_constraintStart_toStartOf="parent"
+                            app:layout_constraintTop_toTopOf="@+id/rest_heart_rate_guideline" />
+                    </androidx.constraintlayout.widget.ConstraintLayout>
+
+                    <androidx.constraintlayout.widget.ConstraintLayout
+                        android:id="@+id/max_stress_layout"
+                        android:layout_width="0dp"
+                        android:layout_height="0dp"
+                        app:layout_constraintBottom_toBottomOf="@+id/min_stress_layout"
+                        app:layout_constraintEnd_toStartOf="@+id/latest_stress_layout"
+                        app:layout_constraintDimensionRatio="1:1"
+                        app:layout_constraintEnd_toEndOf="parent"
+                        app:layout_constraintStart_toEndOf="@+id/min_stress_layout"
+                        app:layout_constraintTop_toTopOf="@+id/min_stress_layout"
+                        app:layout_constraintWidth_percent="0.3">
+
+                        <androidx.constraintlayout.widget.Guideline
+                            android:id="@+id/max_heart_rate_guideline"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal"
+                            app:layout_constraintGuide_percent="0.6" />
+
+                        <TextView
+                            android:id="@+id/tv_max_text"
+                            style="@style/secondaryText"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:fontFamily="@font/poppins_medium"
+                            android:text="@string/maximum"
+                            android:textSize="@dimen/big_text"
+                            app:layout_constraintEnd_toEndOf="parent"
+                            app:layout_constraintHorizontal_chainStyle="spread"
+                            app:layout_constraintStart_toStartOf="parent"
+                            app:layout_constraintTop_toTopOf="@+id/max_heart_rate_guideline" />
+
+                        <TextView
+                            android:id="@+id/tvMaxStress"
+                            style="@style/primaryText"
+                            android:layout_width="0dp"
+                            android:layout_height="0dp"
+                            android:contentDescription="@string/max_value_label"
+                            android:fontFamily="@font/oswald_regular"
+                            android:gravity="center|bottom"
+                            android:paddingStart="1pt"
+                            android:paddingEnd="1pt"
+                            android:singleLine="true"
+                            app:autoSizeMaxTextSize="20pt"
+                            app:autoSizeMinTextSize="10pt"
+                            app:autoSizeStepGranularity="1pt"
+                            app:autoSizeTextType="uniform"
+                            app:layout_constraintBottom_toTopOf="@+id/max_heart_rate_guideline"
+                            app:layout_constraintEnd_toEndOf="parent"
+                            app:layout_constraintStart_toStartOf="parent"
+                            app:layout_constraintTop_toTopOf="parent"
+                            tools:text="119bpm"
+                            tools:textSize="20pt" />
+
+                    </androidx.constraintlayout.widget.ConstraintLayout>
+                    <androidx.constraintlayout.widget.ConstraintLayout
+                        android:id="@+id/latest_stress_layout"
+                        android:layout_width="0dp"
+                        android:layout_height="0dp"
+                        android:layout_marginEnd="@dimen/normal_padding"
+                        app:layout_constraintDimensionRatio="1:1"
+                        app:layout_constraintEnd_toEndOf="parent"
+                        app:layout_constraintTop_toTopOf="@+id/max_stress_layout"
+                        app:layout_constraintWidth_percent="0.3">
+
+                        <androidx.constraintlayout.widget.Guideline
+                            android:id="@+id/avg_heart_rate_guideline"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal"
+                            app:layout_constraintGuide_percent="0.6" />
+
+                        <TextView
+                            android:id="@+id/tv_latest"
+                            style="@style/secondaryText"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:fontFamily="@font/poppins_medium"
+                            android:text="@string/latest"
+                            android:textSize="@dimen/big_text"
+                            app:layout_constraintEnd_toEndOf="parent"
+                            app:layout_constraintStart_toStartOf="parent"
+                            app:layout_constraintTop_toTopOf="@+id/avg_heart_rate_guideline" />
+
+                        <TextView
+                            android:id="@+id/tvLatestStress"
+                            style="@style/primaryText"
+                            android:layout_width="0dp"
+                            android:layout_height="0dp"
+                            android:contentDescription="@string/latest_value_label"
+                            android:fontFamily="@font/oswald_regular"
+                            android:gravity="center|bottom"
+                            android:paddingStart="1pt"
+                            android:paddingEnd="1pt"
+                            android:singleLine="true"
+                            app:autoSizeMaxTextSize="20pt"
+                            app:autoSizeMinTextSize="10pt"
+                            app:autoSizeStepGranularity="1pt"
+                            app:autoSizeTextType="uniform"
+                            app:layout_constraintBottom_toTopOf="@+id/avg_heart_rate_guideline"
+                            app:layout_constraintEnd_toEndOf="parent"
+                            app:layout_constraintStart_toStartOf="parent"
+                            app:layout_constraintTop_toTopOf="parent"
+                            tools:text="79bpm"
+                            tools:textSize="20pt" />
+                    </androidx.constraintlayout.widget.ConstraintLayout>
+                </androidx.constraintlayout.widget.ConstraintLayout>
+            </androidx.constraintlayout.widget.ConstraintLayout>
+        </LinearLayout>
+
+    </ScrollView>
+
+</androidx.constraintlayout.widget.ConstraintLayout>
