@@ -1,1 +1,51 @@
-MAin activityy to calcultate load main activity
+# Health & Wellness Tracker
+
+A comprehensive health and wellness application for Android that helps you monitor your Body Mass Index (BMI), track your sleep patterns, and manage your stress levels.
+
+## 🌟 Features
+
+### BMI Calculator
+*   Easily calculate your Body Mass Index by providing your weight and height.
+*   Get instant results and see where you fall on the health spectrum (e.g., Underweight, Normal, Overweight).
+
+### 😴 Sleep Analysis
+*   **Sleep Hypnogram:** Visualize your sleep stages throughout the night.
+*   Track the quality and duration of your sleep to identify patterns and areas for improvement.
+
+### 🧘 Stress Management
+*   Monitor your stress levels with intuitive charts and visualizations.
+*   Identify sources of stress and develop strategies for a healthier, more balanced life.
+
+## 📸 Screenshots
+
+*(You can add screenshots of your BMI, Sleep, and Stress screens here!)*
+
+## 🛠️ Tech Stack
+
+*   **Kotlin:** The official programming language for Android development.
+*   **Jetpack Compose:** Android's modern declarative UI toolkit for building beautiful, native UIs.
+*   **MVVM Architecture:** A robust and scalable architecture pattern.
+*   **ViewModel:** To manage UI-related data in a lifecycle-conscious way.
+*   **Material Design 3:** The latest design system for a clean and modern look.
+
+## 🚀 How to Build
+
+To build and run this project, you'll need Android Studio.
+
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/Rohitdacoder/BMI-Calci.git
+    ```
+
+2.  **Open in Android Studio:**
+    Open the cloned project directory in Android Studio.
+
+3.  **Sync Gradle:**
+    Let Android Studio sync the project with the Gradle files.
+
+4.  **Run the App:**
+    Select the `app` configuration and run it on an emulator or a physical device.
+
+## 🙏 Contributing
+
+Contributions are welcome! If you have ideas for improvements or find a bug, feel free to open an issue or submit a pull request.
